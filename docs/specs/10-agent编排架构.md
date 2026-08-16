@@ -77,3 +77,28 @@ agent:
 
 - 不做 LHH 的桌面 GUI computer-use / OS 级环境（超出短剧流水线）；Environment 协议留扩展位；
 - 不做 Manager/Executor/Auditor 分模型角色（v1 单适配器；角色映射为设置预留字段）。
+
+## 7. 模块化与官方同步机制（2026-08 定案）
+
+**harness 能力 = 独立模块组，官方仓库直接引用，不 fork 不复制维护：**
+
+```
+项目根
+├── scripts/agentbridge.py        # stdlib 轻量循环 + 适配器（零依赖，内置路径）
+├── scripts/lhh.py                # LHH 桥：vendor 优先导入 + 纯逻辑复用 + 状态摘要
+├── scripts/workflow_patch.py     # agent 写盘（所改即所得）
+├── scripts/test_agentbridge.py / test_acp.py / test_workflow_patch.py
+└── vendor/longhorizon-harness/   # ← 官方仓库 git submodule（AMAP-ML/LongHorizon-Harness）
+```
+
+**同步机制**（接口不变即可，无需另行维护）：
+
+```bash
+git submodule update --remote vendor/longhorizon-harness   # 拉官方最新
+git add vendor/longhorizon-harness && git commit -m "sync: LHH vX.Y"   # 钉住新版本
+```
+
+- lhh.py 只 import 官方固定接口（`DeepSeekHarnessAdapter` / `parse_audit_report` /
+  `audit_report_from_episode_result` / `HarnessConfig` / `EpisodeBudget`）——接口不变则同步后零改动；
+- 官方更新若改变接口 → 在 lhh.py 适配层收敛（唯一改动点），业务代码不动；
+- 我们的 stdlib run_loop / AcpAdapter 为项目自有实现，不依赖官方仓库，删除 vendor 也能跑（降级）。

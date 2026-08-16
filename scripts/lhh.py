@@ -14,18 +14,27 @@
 """
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 import common
+
+# LHH 官方仓库 submodule（vendor/longhorizon-harness，git pull 同步接口不变即复用）。
+# 优先 vendor 路径，回退 pip 安装的 lh-harness。
+VENDOR_LHH = common.ROOT / "vendor" / "longhorizon-harness" / "src"
+if VENDOR_LHH.exists():
+    sys.path.insert(0, str(VENDOR_LHH))
 
 try:
     from lh_harness.adapters import DeepSeekHarnessAdapter
     from lh_harness.manager import (parse_audit_report, audit_report_from_episode_result,
                                      HarnessConfig, EpisodeBudget)
     LHH_AVAILABLE = True
+    LHH_SOURCE = "vendor" if VENDOR_LHH.exists() else "pip"
     _LHH_IMPORT_ERR = None
 except Exception as exc:          # noqa: BLE001 —— 可选依赖，缺失时优雅降级
     LHH_AVAILABLE = False
+    LHH_SOURCE = None
     _LHH_IMPORT_ERR = str(exc)
     parse_audit_report = audit_report_from_episode_result = None
     DeepSeekHarnessAdapter = HarnessConfig = EpisodeBudget = None
@@ -62,10 +71,12 @@ def lhh_status():
     """LHH 可用性与配置摘要（供设置界面 /api/config-agent）。"""
     return {"available": LHH_AVAILABLE,
             "error": _LHH_IMPORT_ERR,
-            "version": "0.1.5",
+            "version": "0.1.5 (submodule af17ce8)",
+            "source": LHH_SOURCE,
             "win_loop": "stdlib run_loop（LHH manager.run 依赖 POSIX 原语，Windows 不适用）",
             "reused": ["DeepSeekHarnessAdapter", "parse_audit_report",
                        "audit_report_from_episode_result", "HarnessConfig", "EpisodeBudget"],
+            "sync": "git submodule update --remote vendor/longhorizon-harness（接口不变即可）",
             "dsh_cli": dsh_adapter_available()}
 
 
