@@ -17,9 +17,6 @@ web/dist/
 # ---- 本地工具二进制（rtk 等，体积大不入库） ----
 tools/rtk/
 
-# ---- 外部依赖（submodule 管理，不重复入库） ----
-vendor/longhorizon-harness/
-
 # ---- 编辑器/系统 ----
 .vscode/
 .idea/

@@ -1,0 +1,3 @@
+[submodule "vendor/longhorizon-harness"]
+	path = vendor/longhorizon-harness
+	url = https://github.com/AMAP-ML/LongHorizon-Harness
