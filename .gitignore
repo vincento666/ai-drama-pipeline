@@ -1,0 +1,27 @@
+# ---- 运行产物 ----
+output/
+config.local.json
+profile/
+*.log
+
+# ---- Python ----
+__pycache__/
+*.pyc
+.venv/
+
+# ---- Node ----
+node_modules/
+web/vue/node_modules/
+web/dist/
+
+# ---- 本地工具二进制（rtk 等，体积大不入库） ----
+tools/rtk/
+
+# ---- 外部依赖（submodule 管理，不重复入库） ----
+vendor/longhorizon-harness/
+
+# ---- 编辑器/系统 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,103 @@
+# AI 短剧/漫剧流水线全局配置
+# 脚本内置极简 YAML 子集解析器，支持：注释(#)、key: value、缩进嵌套、"- " 列表
+
+# ---------- 生成引擎（ComfyUI 所在机器） ----------
+comfyui:
+  base_url: http://127.0.0.1:9288   # ComfyUI 服务地址（8188/8189 曾被系统临时限制，改用 9288；可为远程机器）
+  input_dir: S:/Develop/AIGC/ComfyUI/ComfyUI_windows_portable/ComfyUI/input  # LoadImage 读取目录（参考图/首帧图）
+
+# ---------- LLM（AI 编剧 / 生成 Agent 用，OpenAI 兼容） ----------
+llm:
+  provider: deepseek   # 当前生效提供商：deepseek | qwen | kimi | local（未命中时回退下方旧键）
+  providers:           # 提供商预设表（base 可带 /v1 也可不带）；api_key 留空则回退下方 llm.api_key
+    deepseek:
+      base: https://api.deepseek.com
+      model: deepseek-v4-flash
+      api_key: ""
+    qwen:
+      base: https://dashscope.aliyuncs.com/compatible-mode/v1
+      model: qwen-plus
+      api_key: ""
+    kimi:
+      base: https://api.moonshot.cn/v1
+      model: kimi-k2-0711-preview
+      api_key: ""
+    local:
+      base: http://127.0.0.1:11434/v1   # Ollama 等本地 OpenAI 兼容服务
+      model: qwen2.5:7b
+      api_key: ""
+  # ↓ 旧键（兼容层：providers 未命中时的 custom 兜底）
+  base: https://api.deepseek.com
+  model: deepseek-v4-flash
+  api_key: sk-e62fdb05b59b436f8955ec8e91316277
+
+# ---------- H3 权重（模型名须与 ComfyUI 中实际文件名一致） ----------
+# 2026-08-10 按本机 ComfyUI_windows_portable\ComfyUI\models 实际文件校准
+# 冒烟实测通过组合：INT8 基模 + minimax_h3_turbo_4步加速ema_comfyui LoRA（T8 前端工作流同款）
+h3:
+  diffusion_model: minimax_h3_fl2va_int8_convrot.safetensors   # T2V/I2V/首尾帧 共用（备选：pruned_fp8_scaled）
+  ref2va_model: minimax_h3_ref2va_pruned_fp8_scaled.safetensors  # 引用生视频（人物一致性）
+  video_vae: minimax_h3_video_vae_fp16.safetensors
+  audio_vae: minimax_h3_audio_vae_fp32.safetensors
+  text_encoder: qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors
+  turbo_lora: minimax_h3_turbo_4步加速ema_comfyui.safetensors  # 4 步采样加速 LoRA
+
+# ---------- 生成默认参数（h3-studio 社区基线） ----------
+generate:
+  width: 1024          # 质量甜点：1024x576（8:5）；短剧竖屏用 864x1536（9:16）
+  height: 576
+  frames: 124          # ~5 秒 @24fps；H3 单段上限 15s=360帧
+  steps: 20            # res_multistep + simple 社区基线
+  seed: -1             # -1 随机
+
+# ---------- 成片 ----------
+# ---------- 生态对接层（本项目=生态对接：安装/加载外部 H3 skill 与插件） ----------
+eco:
+  custom_nodes: S:/Develop/AIGC/ComfyUI/ComfyUI_windows_portable/ComfyUI/custom_nodes
+  sources:
+    - S:/Develop/AIGC/ComfyUI/workflows/20260811自动短剧
+
+compose:
+  ffmpeg: S:/Develop/AIGC/ComfyUI/ComfyUI_windows_portable/python_embeded/Lib/site-packages/imageio_ffmpeg/binaries/ffmpeg-win-x86_64-v7.1.exe  # ComfyUI 自带
+  fps: 24
+  resolution: "864x1536"   # 抖音/快手竖屏标准
+
+# ---------- 项目 ----------
+project:
+  root: output         # 输出根目录（与工作区分离）
+  style_prefix: "Chinese ink wash painting style mixed with anime cel-shading"
+
+# ---------- Agent 编排（spec 10：对齐 LongHorizon-Harness 组件设置） ----------
+agent:
+  default: kimi            # 对话窗「外部 harness」默认适配器
+  max_rounds: 8            # 单会话最多委派轮数（防失控）
+  audit:
+    enabled: true          # Auditor 校验开关（产物文件/可解析）
+  adapters:                # 外部 harness agent 适配器设置（cmd/args/timeout/skills_dir）
+    kimi:
+      cmd: kimi
+      args:
+        - -m
+        - kimi-code/k3-256k
+        - --output-format
+        - text
+      timeout: 1800
+      skills_dir: .agents/skills      # 让外部 agent 加载本项目 skills（kimi 实测支持）
+    codex:
+      cmd: codex
+      args:
+        - exec
+      timeout: 1800
+      skills_dir: ""
+    claude:
+      cmd: claude
+      args: []
+      timeout: 1800
+      skills_dir: ""
+    dsh:
+      cmd: dsh
+      args:
+        - --profile
+        - headless
+      timeout: 1800
+      skills_dir: ""

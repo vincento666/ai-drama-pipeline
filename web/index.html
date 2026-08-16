@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI 短剧流水线 · 端到端创作</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header id="topbar">
+  <div class="brand">AI 短剧流水线</div>
+  <label>项目
+    <select id="projectSel"></select>
+  </label>
+  <label>集
+    <select id="episodeSel"></select>
+  </label>
+  <span id="status" class="status"></span>
+  <button id="composeBtn">拼接成片</button>
+  <button id="saveBtn" disabled>保存分镜</button>
+</header>
+
+<!-- 创作向导步骤条（借鉴 Toonflow 引导式流程） -->
+<nav id="wizardBar"></nav>
+
+<!-- 第 1 步：剧本 · AI 编剧 -->
+<section id="scriptPanel" class="hidden">
+  <h2>① 剧本 · AI 编剧</h2>
+  <p class="hint">粘贴小说/素材 → 保存 → AI 编剧。配置了本地 LLM（config.yaml 的 llm_base/llm_model）会一键生成剧本草稿；
+  无 LLM 时输出"Agent 编剧指令"，发给任意 AI Agent（Reasonix / Codex / Claude），由 Agent 把剧本写入 剧本.md。</p>
+  <div class="ai-write">
+    <textarea id="novelBox" placeholder="在这里粘贴小说原文或创作素材…（存为项目/小说.md）" rows="12"></textarea>
+    <div class="row">
+      <button id="saveNovelBtn">保存小说</button>
+      <button id="extractEventsBtn">提取事件图谱</button>
+      <button id="aiWriteBtn">AI 编剧</button>
+      <span id="aiStatus" class="render-status"></span>
+    </div>
+    <div id="eventsArea" class="ai-result"></div>
+    <div id="aiResult" class="ai-result"></div>
+  </div>
+</section>
+
+<main id="layout">
+
+  <!-- 左：剧本分段树 -->
+  <aside id="treePanel">
+    <h3>剧本分段</h3>
+    <div id="actsTree" class="tree"></div>
+    <p class="hint">按剧本.md 的“## 幕标题”自动分段；点击幕查看文本，点击集加载分镜表。</p>
+  </aside>
+
+  <!-- 中：分镜表 -->
+  <section id="boardPanel">
+    <div id="actText" class="act-text"></div>
+    <table id="board">
+      <thead>
+        <tr>
+          <th>镜号</th><th>景别</th><th>机位运动</th><th>时长(s)</th>
+          <th>角色</th><th>场景</th><th>灯光</th><th>对白/音效</th><th>备注</th><th>选中</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <div class="toolbar">
+      <button id="addRowBtn">＋ 插入行</button>
+      <button id="delRowBtn" disabled>删除行</button>
+      <button id="upRowBtn" disabled>↑ 上移</button>
+      <button id="downRowBtn" disabled>↓ 下移</button>
+    </div>
+  </section>
+
+  <!-- 右：详情 + 抽卡 + 提示词 -->
+  <aside id="detailPanel">
+    <h3>分镜详情</h3>
+    <div id="detail" class="detail"></div>
+
+    <h3>抽卡（H3 生成）</h3>
+    <div class="render-ctl">
+      <button id="renderBtn" disabled>抽卡</button>
+      <select id="shotsSel" title="候选数">
+        <option value="1">1 候选</option>
+        <option value="2" selected>2 候选</option>
+        <option value="3">3 候选</option>
+      </select>
+      <select id="modeSel" title="生成模式">
+        <option value="quick" selected>快速 ~9s/段（512×288/1s/2步）</option>
+        <option value="std">标准 ~48s/段（1024×576/按时长/4步）</option>
+      </select>
+      <select id="refSel" title="参考图（人物一致性，Ref2VA）">
+        <option value="">无参考图（T2VA）</option>
+      </select>
+      <span id="renderStatus" class="render-status"></span>
+    </div>
+    <div id="gallery" class="gallery"></div>
+
+    <h3>H3 提示词预览</h3>
+    <pre id="promptPreview" class="prompt"></pre>
+    <p class="hint">预览与 render 实际生成用的提示词一致；选中候选后自动规范化为 shot_XX.mp4。</p>
+
+    <h3>成片预览</h3>
+    <div id="finalArea" class="final-area"></div>
+  </aside>
+
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>
