@@ -12,6 +12,23 @@ import common
 import gen_storyboard
 import refs
 
+# P5 文档版本快照（web/doc_versions.py，仅标准库）：apply_patch 是 /api/patch 与
+# agent_manager._run_patch 两条写盘链路的单点，这里做“应用前快照”覆盖两路。
+# 守卫式导入：doc_versions 在 web/ 下，scripts 上下文（单元测试/CLI）自动补路径；
+# 导入失败（如 web 不可用）则快照静默跳过，绝不拖垮写盘主流程。
+try:
+    import doc_versions
+except Exception:  # noqa: BLE001 —— 守卫导入：快照是附加能力
+    try:
+        import sys as _sys
+        from pathlib import Path as _Path
+        _web = _Path(__file__).resolve().parent.parent / "web"
+        if str(_web) not in _sys.path:
+            _sys.path.insert(0, str(_web))
+        import doc_versions
+    except Exception:  # noqa: BLE001
+        doc_versions = None
+
 
 # ============ 分镜行写盘 ============
 
@@ -61,6 +78,39 @@ def patch_shot(project, episode, shot, field, value):
     return {"shot": int(shot), "field": field, "value": str(value)}
 
 
+def reorder_shots(project, episode, action, a, b):
+    """重排分镜行（镜号不变，仅表序变化）并写回 分镜.md。
+
+    action ∈ swap（交换镜X和镜Y）/ move_before（把镜X移到镜Y前）/ move_after（移到镜Y后）。
+    返回 {action, a, b, order}；镜号不存在抛 ValueError；a==b 为无操作（不写盘）。
+    """
+    header, rows, p = _read_board(project, episode)
+
+    def _idx(n):
+        return next((i for i, r in enumerate(rows)
+                     if str(r.get("shot")) == str(int(n))), None)
+
+    ia, ib = _idx(a), _idx(b)
+    if ia is None or ib is None:
+        raise ValueError("分镜 %d/%d 不存在" % (int(a), int(b)))
+    if int(a) == int(b):
+        return {"action": action, "a": int(a), "b": int(b),
+                "order": [int(str(r.get("shot"))) for r in rows]}
+    if action == "swap":
+        rows[ia], rows[ib] = rows[ib], rows[ia]
+    elif action in ("move_before", "move_after"):
+        row = rows.pop(ia)
+        # pop 后重新定位 b（索引可能已位移）
+        ib2 = next((i for i, r in enumerate(rows)
+                    if str(r.get("shot")) == str(int(b))), None)
+        rows.insert(ib2 if action == "move_before" else ib2 + 1, row)
+    else:
+        raise ValueError("未知重排动作: %s" % action)
+    _write_board(header, rows, p)
+    return {"action": action, "a": int(a), "b": int(b),
+            "order": [int(str(r.get("shot"))) for r in rows]}
+
+
 # ============ 剧本/简报写盘 ============
 
 _BLOCKS = {
@@ -97,11 +147,22 @@ _FIELD_MAP = {"对白": "dialogue", "灯光": "light", "景别": "frame", "运�
 
 
 def parse_edit_action(text):
-    """自然语言 → 变更清单（v1 规则版：镜N + 字段 + 改为/改成/设为）。
+    """自然语言 → 变更清单（v1 规则版）。
 
     例：把镜3的灯光改为夜景 → [{op:shot, shot:3, field:light, value:夜景}]
+        交换镜1和镜2        → [{op:reorder, action:swap, a:1, b:2}]
+        把镜3移到镜1前面    → [{op:reorder, action:move_before, a:3, b:1}]
     """
     t = (text or "").strip()
+    m = re.search(r"交换\s*镜\s*(\d+)\s*和\s*镜\s*(\d+)", t)
+    if m:
+        return [{"op": "reorder", "action": "swap",
+                 "a": int(m.group(1)), "b": int(m.group(2))}]
+    m = re.search(r"把\s*镜\s*(\d+)\s*移\s*到\s*镜\s*(\d+)\s*([前后])", t)
+    if m:
+        return [{"op": "reorder",
+                 "action": "move_before" if m.group(3) == "前" else "move_after",
+                 "a": int(m.group(1)), "b": int(m.group(2))}]
     m = re.search(
         r"(?:第\s*(\d+)\s*镜|镜\s*(\d+)).*?"
         r"(对白|灯光|景别|运镜|时长|角色|场景|备注)"
@@ -121,6 +182,11 @@ def parse_edit_action(text):
 def _summarize(op, item):
     if op == "shot":
         return "镜%02d %s → %s" % (item["shot"], item["field"], item["value"])
+    if op == "reorder":
+        if item["action"] == "swap":
+            return "交换镜%d和镜%d" % (item["a"], item["b"])
+        return "把镜%d移到镜%d%s" % (item["a"], item["b"],
+                                  "前" if item["action"] == "move_before" else "后")
     if op == "script":
         return "%s 整块替换（%d 字）" % (item["block"], item["chars"])
     if op == "ref":
@@ -129,13 +195,38 @@ def _summarize(op, item):
 
 
 def apply_patch(project, changes, episode=1):
-    """逐条应用变更清单 → {applied: [...], errors: [...]}。applied 项带 op+summary（前端契约）。"""
+    """逐条应用变更清单 → {applied: [...], errors: [...]}。applied 项带 op+summary（前端契约）。
+
+    P5：应用前按改动目标文件归类 doc 做快照（同批次同 doc 只快照一次），
+    供前端 doc.diff 撤销（恢复上一版本）。快照失败静默（附加能力不阻塞写盘）。
+    """
     applied, errors = [], []
+    snap_done = set()
+
+    def _snap(ch):
+        if doc_versions is None:
+            return
+        doc = doc_versions.doc_of_change(ch)
+        if doc is None:
+            return
+        key = (doc, episode)
+        if key in snap_done:
+            return
+        snap_done.add(key)
+        try:
+            doc_versions.snapshot(project, doc, source="patch", episode=episode)
+        except Exception:  # noqa: BLE001
+            pass
+
     for ch in changes or []:
         op = ch.get("op")
         try:
+            _snap(ch)
             if op == "shot":
                 item = patch_shot(project, episode, ch["shot"], ch["field"], ch["value"])
+                applied.append({"op": op, **item, "summary": _summarize(op, item)})
+            elif op == "reorder":
+                item = reorder_shots(project, episode, ch["action"], ch["a"], ch["b"])
                 applied.append({"op": op, **item, "summary": _summarize(op, item)})
             elif op == "script":
                 item = patch_script_block(project, ch["block"], ch["text"])

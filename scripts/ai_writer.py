@@ -179,6 +179,40 @@ def assets_prompt(script_text, title, brief=""):
     ) % script_text[:8000]
 
 
+def brief_from_idea_prompt(idea, title=""):
+    """从零编剧 ①：想法 → 创作简报（一致性/风格锚点，与链式生成共用）。"""
+    t = "（作品暂定名《%s》）" % title if title else ""
+    return (
+        "你是本地化 HTV 短剧创作总监。用户只有一句创作想法，还没有任何素材，"
+        "请把想法打磨成可执行的《创作简报》Markdown%s，作为后续 小说/剧本/分镜/资产 "
+        "链式生成的唯一上下文锚点。\n\n"
+        "## 创作简报\n"
+        "### 一句话故事核\n<≤50字，核心吸引力>\n"
+        "### 题材与卖点\n### 目标观众\n### 整体风格（视觉与音乐）\n"
+        "### 时长与分集（单集时长、总集数，默认单集 1-2 分钟、共 6 集）\n"
+        "### 主要角色（名称/身份/外貌锚定/性格/冲突）\n### 关键场景\n"
+        "### 对白语言风格\n### 一致性锚点（外观词汇固定，生成时不得换词）\n"
+        "### 约束与红线\n\n"
+        "要求：想法中未提及的项合理补全（不要写「待定」）；只输出简报正文，不要解释。\n\n"
+        "===== 创作想法 =====\n%s"
+    ) % (t, idea[:2000])
+
+
+def novel_from_idea_prompt(idea, brief, title=""):
+    """从零编剧 ②：想法+简报 → 3000-6000 字短剧小说素材（支撑链式编剧）。"""
+    return _brief_block(brief) + (
+        "你是短剧小说素材写手。请基于创作想法与创作简报，写出一篇 3000-6000 字的"
+        "短剧小说素材（不是完整剧本，是供改编的事件素材），要求：\n"
+        "1. 覆盖完整故事弧：开端→发展→高潮→结局，节奏紧凑，适合短剧快节奏；\n"
+        "2. 人物清晰：主角/反一号/关键配角（含外貌锚定与动机）；\n"
+        "3. 场景 3-5 个，能映射为 S01/S02… 代号；\n"
+        "4. 冲突与反转明确，结尾留强钩子（追下集）；\n"
+        "5. 人物/场景/道具出现时标注代号（C01/S01/P01），供后续资产登记；\n"
+        "6. 只输出小说正文（Markdown），不要解释。\n\n"
+        "===== 创作想法 =====\n%s"
+    ) % (idea[:2000])
+
+
 # ============ 文件读写 ============
 
 BRIEF_FILE = "创作简报.md"
@@ -204,6 +238,16 @@ def _write(project, fname, text):
     root = project_dir(project)
     root.mkdir(parents=True, exist_ok=True)
     dest = root / fname
+    # P5.1：链式写入前快照（守卫式导入——doc_versions 顶部 import ai_writer，
+    # 函数内导入避免循环；快照失败静默不阻塞写盘）
+    try:
+        import doc_versions as _dv
+        _doc = _DOC_OF_FILE.get(str(fname).split("/")[-1])
+        if _doc:
+            _dv.snapshot(project, _doc, source="ai_writer",
+                         note="AI 链式写入 %s" % fname)
+    except Exception:
+        pass
     dest.write_text(text, encoding="utf-8")
     return dest
 
@@ -213,6 +257,16 @@ def read_events(project): return _read(project, EVENTS_FILE)
 def read_skeleton(project): return _read(project, SKELETON_FILE)
 def read_script(project): return _read(project, SCRIPT_FILE)
 def read_assets(project): return _read(project, ASSETS_FILE)
+
+# P5.1：文件名 → 文档版本 doc key（链式写入快照用；分镜走 workflow_patch/PUT 已有快照，不在此列）
+_DOC_OF_FILE = {
+    "小说.md": "novel",
+    "创作简报.md": "brief",
+    "小说事件.md": "script",
+    "故事骨架.md": "script",
+    "剧本.md": "script",
+    "资产清单.md": "assets",
+}
 
 def write_novel(project, text): return _write(project, NOVEL_FILE, text)
 def write_events(project, text): return _write(project, EVENTS_FILE, text)
@@ -265,11 +319,20 @@ def agent_assets_instruction(project):
                        ASSETS_FILE, "资产清单将用于登记资产库（角色/场景/道具）。")
 
 
-def chain(project, title=""):
+# ============ 链式编剧（事件→骨架→剧本→资产） ============
+
+_STEP_LABELS = {"events": "事件图谱", "skeleton": "故事骨架",
+                "script": "剧本", "assets": "资产清单"}
+
+
+def chain(project, title="", on_step=None):
     """一键链式编剧：事件→骨架→剧本→资产。返回 (mode, results)。
 
     mode = 'llm'：本地 LLM 依次生成并写入文件，results = 已生成的模式列表；
     mode = 'agent'：无 LLM，返回合并的 Agent 指令（results 为空）。
+
+    on_step(label, summary)：可选进度回调（P3.5），每完成一步（事件图谱/故事骨架/
+    剧本/资产清单）调用一次，label 见 _STEP_LABELS；默认 None 不破坏现有调用方。
     """
     cfg = load_config()
     ok, base = llm_available(cfg)
@@ -299,7 +362,65 @@ def chain(project, title=""):
         text = call_llm(base, model, prompt)
         writer(project, text)
         done.append(mode)
+        if on_step:
+            try:
+                on_step(_STEP_LABELS.get(mode, mode), "已生成 %s" % mode)
+            except Exception:
+                pass
     return "llm", done
+
+
+# ============ 从零编剧（无小说：想法 → 创作简报 → 小说素材） ============
+
+def brief_from_idea(project, idea, title="", on_step=None):
+    """从零编剧 ①：想法 → 创作简报.md（已有简报则跳过，视为成功）。返回是否成功。
+
+    走现有 llm_available / pick_model / call_llm（config llm.provider 实测可用）；
+    无 LLM 或 LLM 未产出内容返回 False（调用方决定错误提示/委派）。
+    """
+    if read_brief(project):
+        return True
+    cfg = load_config()
+    ok, base = llm_available(cfg)
+    if not ok:
+        return False
+    model = pick_model(cfg, base)
+    text = call_llm(base, model, brief_from_idea_prompt(idea, title or project))
+    text = (text or "").strip()
+    if not text:
+        return False
+    write_brief(project, text)
+    if on_step:
+        try:
+            on_step("brief", "已生成 创作简报.md")
+        except Exception:
+            pass
+    return True
+
+
+def novel_from_idea(project, idea, title="", brief="", on_step=None):
+    """从零编剧 ②：想法+简报 → 小说.md（3000-6000 字素材，支撑链式编剧）。返回是否成功。
+
+    已有 小说.md 则跳过（视为成功）；无 LLM 或 LLM 未产出内容返回 False。
+    """
+    if read_novel(project):
+        return True
+    cfg = load_config()
+    ok, base = llm_available(cfg)
+    if not ok:
+        return False
+    model = pick_model(cfg, base)
+    text = call_llm(base, model, novel_from_idea_prompt(idea, brief, title or project))
+    text = (text or "").strip()
+    if not text:
+        return False
+    write_novel(project, text)
+    if on_step:
+        try:
+            on_step("novel", "已生成 小说.md")
+        except Exception:
+            pass
+    return True
 
 
 def storyboard_from_script(project, episode=1):

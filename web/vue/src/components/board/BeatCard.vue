@@ -2,7 +2,7 @@
   <div class="beat-card" :class="{ selected, 'drop-target': dropTarget }" :style="{ width: width + 'px' }" @click="emit('select')">
     <button class="redraw" :class="{ spinning: rendering }" title="重抽本镜" @click.stop="emit('redraw')">⟳</button>
     <div class="thumb">
-      <img v-if="refImage" :src="refSrc" :alt="'镜' + (index + 1)" loading="lazy" />
+      <img v-if="refSrc" :src="refSrc" :alt="'镜' + (index + 1)" loading="lazy" />
       <div v-else class="thumb-empty">未出图</div>
     </div>
     <div class="meta">
@@ -14,14 +14,13 @@
 </template>
 
 <script setup>
-import { computed, inject } from 'vue'
-import { enc } from '../../api'
+import { computed } from 'vue'
 
 const props = defineProps({
   row: { type: Object, required: true },
   index: { type: Number, required: true },
   width: { type: Number, required: true },       // 卡宽 = 时长映射（min 120 / max 280，容器算好传入）
-  refImage: { type: String, default: null },     // refs/shot_XX.png 文件名，null = 占位
+  refSrc: { type: String, default: null },       // 参考图/资产图完整 URL（BoardCanvas 计算，含自动关联兜底）
   status: { type: String, default: 'none' },     // none 无候选 | cands 有候选 | picked 已选
   selected: { type: Boolean, default: false },
   rendering: { type: Boolean, default: false },
@@ -29,8 +28,6 @@ const props = defineProps({
 })
 const emit = defineEmits(['select', 'redraw'])
 
-const store = inject('store')
-const refSrc = computed(() => `/refs/${enc(store.project.value)}/${store.episode.value}/${props.refImage}`)
 const statusLabel = computed(() => ({ none: '无候选', cands: '有候选', picked: '已选' }[props.status] || ''))
 </script>
 

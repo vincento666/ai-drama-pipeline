@@ -77,6 +77,60 @@ class TestParseEditAction(unittest.TestCase):
     def test_parse_unresolvable_empty(self):
         self.assertEqual(workflow_patch.parse_edit_action("今天天气不错"), [])
 
+    def test_parse_swap_shots(self):
+        self.assertEqual(workflow_patch.parse_edit_action("交换镜1和镜2"),
+                         [{"op": "reorder", "action": "swap", "a": 1, "b": 2}])
+
+    def test_parse_move_before(self):
+        self.assertEqual(workflow_patch.parse_edit_action("把镜3移到镜1前面"),
+                         [{"op": "reorder", "action": "move_before", "a": 3, "b": 1}])
+
+    def test_parse_move_after(self):
+        self.assertEqual(workflow_patch.parse_edit_action("把镜1移到镜2后面"),
+                         [{"op": "reorder", "action": "move_after", "a": 1, "b": 2}])
+
+
+class TestReorderShots(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.old = common.OUTPUT
+        common.OUTPUT = Path(self.tmp.name)
+        _seed_board()
+
+    def tearDown(self):
+        common.OUTPUT = self.old
+        self.tmp.cleanup()
+
+    def _shot_order(self):
+        rows = load_storyboard(common.episode_dir("t", 1) / "分镜.md")
+        return [str(r["shot"]) for r in rows]
+
+    def test_swap(self):
+        r = workflow_patch.reorder_shots("t", 1, "swap", 1, 2)
+        self.assertEqual(r["order"], [2, 1])
+        self.assertEqual(self._shot_order(), ["2", "1"])
+
+    def test_move_before(self):
+        r = workflow_patch.reorder_shots("t", 1, "move_before", 2, 1)
+        self.assertEqual(r["order"], [2, 1])
+        self.assertEqual(self._shot_order(), ["2", "1"])
+
+    def test_move_after(self):
+        r = workflow_patch.reorder_shots("t", 1, "move_after", 1, 2)
+        self.assertEqual(r["order"], [2, 1])
+        self.assertEqual(self._shot_order(), ["2", "1"])
+
+    def test_missing_shot_raises(self):
+        with self.assertRaises(ValueError):
+            workflow_patch.reorder_shots("t", 1, "swap", 1, 9)
+
+    def test_apply_patch_reorder(self):
+        result = workflow_patch.apply_patch(
+            "t", [{"op": "reorder", "action": "swap", "a": 1, "b": 2}], episode=1)
+        self.assertEqual(len(result["applied"]), 1)
+        self.assertEqual(result["applied"][0]["summary"], "交换镜1和镜2")
+        self.assertEqual(self._shot_order(), ["2", "1"])
+
 
 class TestScriptAndRef(unittest.TestCase):
     def setUp(self):

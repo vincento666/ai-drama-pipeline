@@ -2,14 +2,13 @@
   <div class="board-wrap" id="lane-board">
     <div class="board-toolbar">
       <span class="t">{{ rows.length }} 镜</span>
-      <button @click="genFromScript">从剧本生成分镜</button>
       <button @click="addRow">＋ 插入镜头</button>
       <button @click="delRow" :disabled="sel < 0">删除</button>
       <button @click="move(-1)" :disabled="sel <= 0">↑</button>
       <button @click="move(1)" :disabled="sel < 0 || sel >= rows.length - 1">↓</button>
       <button class="mode-btn" @click="toggleMode">{{ isTimeline ? '⇦ 网格模式' : '⇨ 时间轴模式' }}</button>
       <span class="spacer" />
-      <span class="hint">{{ isTimeline ? '卡宽=时长映射；悬停卡片右上角 ⟳ 重抽本镜；点卡在右侧检查器编辑/抽卡' : '点卡片在右侧检查器抽卡/选片；字段改动后记得「保存分镜」' }}</span>
+      <span class="hint">{{ isTimeline ? '卡宽=时长映射；悬停卡片右上角 ⟳ 重抽本镜；点卡在右侧检查器编辑/抽卡' : '卡片为只读摘要；点卡片在右侧检查器编辑/抽卡；字段改动后记得「保存分镜」' }}</span>
     </div>
 
     <!-- 时间轴模式（默认）：刻度尺 + 节拍卡横排 -->
@@ -18,7 +17,7 @@
         <BeatRuler :ticks="rulerTicks" :total-width="totalWidth" />
         <div class="tl-cards" :style="{ gap: CARD_GAP + 'px' }">
           <BeatCard v-for="(row, i) in rows" :key="i" :row="row" :index="i" :width="beatWidths[i]"
-            :ref-image="refOf(i)" :status="beatStatus(i)" :selected="i === sel" :rendering="redrawing.has(i + 1)"
+            :ref-src="refSrcOf(i)" :status="beatStatus(i)" :selected="i === sel" :rendering="redrawing.has(i + 1)"
             :drop-target="dropIdx === i" draggable="true"
             @select="sel = i" @redraw="redrawShot(i)"
             @dragstart="onDragStart(i, $event)" @dragover.prevent="onDragOver(i)"
@@ -28,15 +27,15 @@
       <div v-else class="empty">暂无分镜——点「＋ 插入镜头」或先 AI 编剧生成剧本后一键分镜</div>
     </template>
 
-    <!-- 网格模式：幕树 + 可编辑卡片（原视图保留） -->
+    <!-- 网格模式：幕树 + 只读摘要卡（P6b：编辑唯一入口 = Inspector） -->
     <div v-else class="grid-wrap">
       <ActTree :acts="acts" />
       <section class="board-panel">
         <div class="cards">
           <ShotCard v-for="(row, i) in rows" :key="i" :row="row" :index="i"
-            :selected="i === sel" :has-final="finals.has(shotName(i))" :vocab="vocab"
-            :drop-target="dropIdx === i" draggable="true"
-            @select="sel = i" @dirty="markDirty"
+            :selected="i === sel" :has-final="finals.has(shotName(i))" :ref-src="refSrcOf(i)"
+            :cand-count="candCounts[i + 1] || 0" :drop-target="dropIdx === i" draggable="true"
+            @select="sel = i"
             @dragstart="onDragStart(i, $event)" @dragover.prevent="onDragOver(i)"
             @drop="onDrop(i)" @dragend="onDragEnd" />
           <div v-if="!rows.length" class="empty">暂无分镜——点「＋ 插入镜头」或先 AI 编剧生成剧本后一键分镜</div>
@@ -72,7 +71,20 @@ const isTimeline = computed(() => store.timelineMode.value === 'timeline')
 function toggleMode() { store.timelineMode.value = isTimeline.value ? 'grid' : 'timeline' }
 
 function shotName(i) { return `shot_${String(i + 1).padStart(2, '0')}.mp4` }
-function refOf(i) { const r = refsByShot.value[i + 1]; return (r && r.image) || null }
+// P6b：卡图 = 该镜参考图（refs/shot_XX.png）优先；无则自动关联该镜角色/场景资产图（/asset-img/<code>）
+function refSrcOf(i) {
+  const r = refsByShot.value[i + 1]
+  if (r && r.image) return `/refs/${enc(project.value)}/${episode.value}/${r.image}`
+  const row = rows.value[i]
+  if (!row) return null
+  const codes = [...(row.chars || '').split(',').map(c => c.trim()).filter(Boolean),
+    (row.scene || '').trim()].filter(Boolean)
+  for (const c of codes) {
+    const a = store.assets[c]
+    if (a && a.image) return `/asset-img/${a.code}`
+  }
+  return null
+}
 function beatStatus(i) {
   if (store.pickedShots.value.has(i + 1)) return 'picked'
   if ((candCounts.value[i + 1] || 0) > 0) return 'cands'
@@ -207,15 +219,15 @@ function onDrop(i) {
   markDirty()
 }
 
-// 卡级重抽（F22）：单镜 Draw，快速档默认参数；完成后刷新画布数据
+// 卡级重抽（F22）：单镜 Draw；P7a 参数收敛——不再传 quick 档覆盖（后端 P6a 已忽略
+// width/height/frames/steps，统一走 config generate 段 + 分镜行 dur 派生）；完成后刷新画布数据
 async function redrawShot(i) {
   const n = i + 1
   if (redrawing.value.has(n)) return
   redrawing.value = new Set(redrawing.value).add(n)
   store.setStatus(`镜${n} 重抽中…`, '')
   try {
-    const body = { project: project.value, episode: episode.value, only: [n], shots: 2,
-      width: 512, height: 288, frames: 22, steps: 2 }
+    const body = { project: project.value, episode: episode.value, only: [n], shots: 2 }
     const r = await api('/api/render', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     const job = r.job
     const timer = setInterval(async () => {
@@ -269,6 +281,9 @@ onMounted(async () => {
   await loadAll()
 })
 onBeforeUnmount(() => { store.selection.value = null })
+
+// P1 三栏壳：视图头「从剧本生成分镜」经 BoardView 转发到这里（genFromScript 函数本体不变）
+defineExpose({ genFromScript })
 </script>
 
 <style scoped>

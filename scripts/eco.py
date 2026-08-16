@@ -202,10 +202,24 @@ def cmd_check(args):
         return 1
 
 
+def cmd_refresh(_):
+    """重新发现生态源：从 config 的 eco.sources 重新扫描 zip/工作流/skill 清单。"""
+    cfg, custom_nodes, sources, found, rows = eco_status()
+    n_src = sum(1 for s in sources if s.exists())
+    print("生态源刷新完成：%d 个源目录，发现 %d 个 zip、%d 个文件"
+          % (n_src, len(found["zips"]), len(found["files"])))
+    for name, p in sorted(found["zips"].items()):
+        print("  [zip] %s  (%s)" % (name, p))
+    for name, p in sorted(found["files"].items()):
+        print("  [file] %s  (%s)" % (name, p))
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description="H3 生态管理器（生态对接层）")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("list", help="列出生态清单 + 安装状态").set_defaults(fn=cmd_list)
+    sub.add_parser("refresh", help="从生态源重新发现 zip/工作流/skill").set_defaults(fn=cmd_refresh)
     p = sub.add_parser("install", help="安装插件/skill/工作流")
     p.add_argument("id")
     p.set_defaults(fn=cmd_install)

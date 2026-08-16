@@ -18,6 +18,7 @@ from pathlib import Path
 
 from common import ConfigError, load_config, episode_dir, project_dir
 from gen_storyboard import classify_audio, fmt_time, load_storyboard, parse_dur
+import wf_adapter                    # noqa: E402  P7b 引擎语义适配（resolve_workflow engine_id / litegraph 模板）
 
 FRAME_GRID = 17        # H3 原生帧网格 17n+5
 FRAME_MIN = 22
@@ -208,13 +209,15 @@ def ui_to_api(wf_ui):
 
 
 def load_template(path):
-    """读工作流 JSON；UI 格式自动转 API 格式。文件缺失 → ConfigError。"""
+    """读工作流 JSON；UI 格式 / 新版 LiteGraph 格式自动转 API 格式。文件缺失 → ConfigError。"""
     p = Path(path)
     if not p.is_file():
         raise ConfigError("工作流模板不存在: %s" % path)
     data = json.loads(p.read_text(encoding="utf-8"))
-    if any("widgets_values" in (n or {}) for n in data.values()):
+    if any("widgets_values" in n for n in data.values() if isinstance(n, dict)):
         data = ui_to_api(data)
+    elif wf_adapter.is_litegraph(data):     # P7b：新版 ComfyUI 导出（nodes 数组）
+        data = wf_adapter.litegraph_to_api(data)
     return data
 
 
@@ -231,8 +234,24 @@ def inject_params(wf, mapping, params):
     return out
 
 
-def resolve_workflow(cfg, **params):
-    """按 workflow.mode 分派：builtin → 内置构造器；template → 模板 + 注入映射。"""
+def resolve_workflow(cfg, engine_id=None, **params):
+    """按 workflow.mode 分派：builtin → 内置构造器；template → 模板 + 注入映射。
+
+    P7b：engine_id 给定（引擎注册表记录）→ 按引擎 provider 分派：
+      provider=comfyui → load_template(engine.workflow) + inject_params(engine.mapping)；
+      provider=api → NotImplemented（预留在线 API 引擎）。
+    未配置 engines / engine_id=None → 行为与现状完全一致（向后兼容铁律）。
+    """
+    if engine_id and str(engine_id).strip() != "builtin":
+        eng = wf_adapter.find_engine(wf_adapter.load_engines(), engine_id)
+        if eng is None:
+            raise ConfigError("引擎不存在: %s（可先「扫描工作流」再「对接工作流X」注册）"
+                              % engine_id)
+        if eng.get("provider") != "comfyui":
+            raise ConfigError("在线 API 引擎尚未接入：先配 ComfyUI 工作流（引擎 %s，"
+                              "provider=%s）" % (engine_id, eng.get("provider")))
+        wf = load_template(eng.get("workflow", ""))
+        return inject_params(wf, eng.get("mapping", {}), params)
     wf_cfg = cfg.get_path("workflow", {}) or {}
     if wf_cfg.get("mode") == "template":
         wf = load_template(wf_cfg.get("template", ""))
@@ -261,7 +280,12 @@ def submit(cfg, wf):
 
 def render(project, episode, shots_per_shot=1, width=None, height=None,
            frames=None, steps=None, seed=1, only=None, dry_run=False,
-           timeout=DEFAULT_TIMEOUT, image=None, ref_image=None):
+           timeout=DEFAULT_TIMEOUT, image=None, ref_image=None, engine=None):
+    """ComfyUI 抽卡主流程。
+
+    engine（P7b）：引擎 id（config engines 段已注册）→ resolve_workflow 走引擎模板+映射；
+    None（默认）→ 现状 builtin/template 逻辑（向后兼容）。
+    """
     cfg = load_config()
     e_dir = episode_dir(project, episode)
     sb = e_dir / "分镜.md"
@@ -309,9 +333,9 @@ def render(project, episode, shots_per_shot=1, width=None, height=None,
     base = cfg.get_path("comfyui.base_url", "http://127.0.0.1:8188")
     pending = {}  # prompt_id -> 输出名
     for i, k, prompt, n_frames, sd, name in tasks:
-        wf = resolve_workflow(cfg, prompt=prompt, width=width, height=height,
-                              frames=n_frames, steps=steps, seed=sd, prefix=name,
-                              image=image, ref_image=ref_image)
+        wf = resolve_workflow(cfg, engine_id=engine, prompt=prompt, width=width,
+                              height=height, frames=n_frames, steps=steps, seed=sd,
+                              prefix=name, image=image, ref_image=ref_image)
         try:
             resp = submit(cfg, wf)
         except Exception as ex:
@@ -392,10 +416,11 @@ def main():
     ap.add_argument("--ref-image", help="参考图文件名（ComfyUI/input 下），给出则走 Ref2VA（人物一致性）")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
+    ap.add_argument("--engine", help="P7b：已注册引擎 id（config engines 段），缺省走内置/模板")
     a = ap.parse_args()
     sys.exit(0 if render(a.name, a.episode, a.shots, a.width, a.height,
                          a.frames, a.steps, a.seed, a.only, a.dry_run,
-                         a.timeout, a.image, a.ref_image) else 1)
+                         a.timeout, a.image, a.ref_image, a.engine) else 1)
 
 
 if __name__ == "__main__":

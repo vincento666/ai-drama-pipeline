@@ -36,6 +36,25 @@
 | R4 Agent 驱动 + 侧板 | AgentBar 指令条联调 + PlanFlow 规划流 + 剧本侧板抽屉 | ✅ 交付 | DSH 复验 build（58 modules）+ index/js 200；F19 AgentBar 端到端（dry-run→执行→画布刷新） |
 | R5 视觉打磨 | 播放头/动效/细节（可选收尾） | ⬜ 待定 | — |
 
+### 阶段 C：前端重构（三栏壳 · 设计文档 docs/11-前端重构设计方案.md · 进行中 🔵）
+
+| 切片 | 内容 | 状态 | 验收 |
+|---|---|---|---|
+| P0 设置 bug 修复 | common.py `[]` 解析为真列表 + server.py config-agent 类型归一化（args→list/timeout→int/enabled→bool） | ✅ | 实测 `args: []` → `[]`，TypeError 根除 |
+| P1 三栏壳 | 顶栏极简 + 左 AI 栏（可拖 280–640px）+ 中栏四视图（剧本/美术·资产/分镜/成片）+ 右栏三态折叠（300px/24px 窄条/隐藏）+ EventTrace 垂直进度条组件（暗夜绿流光/mock）；删 8 旧组件（AgentBar/ScriptDrawer/OnboardPanel/JobDrawer/AgentDock/PlanFlow/CanvasView/LaneShell） | ✅ | build 66 modules + 冒烟全绿（kimi 交付）；待浏览器人工走查（http://127.0.0.1:18999） |
+| P2 会话+manager | 会话 CRUD/chat/持久化（profile/sessions/）+ manager→executor→auditor 骨架 + 任务/事件落盘 | ⬜ 进行中 | — |
+| P3 SSE 事件回显 | /api/events + EventTrace 接真 + 流式输出 + 审计日志（events.jsonl） | ✅ | 142 测试；smoke_accept 全绿（trace/msg/doc.diff/rev 实测到达） |
+| P3.5 回显/轨迹修复 | 终态收尾器（无卡死 running）+ EventTrace 去重合并 + ThinkingTrace「思考中」折叠块 + 外派=tool 事件（agent 名/exit/transcript 回执）+ pollRev 10s 兜底（SSE 半死不锁死）+ Inspector 删画布总览 + SessionRail 折叠 | ✅ | pytest 142 / build 68 modules / smoke_accept 卡死 running=无（18999 真机复验） |
+| P4a 从零编剧+skill 集 | 无小说自动「想法→创作简报→小说素材」+ `.agents/skills/htv-video-production` + `htv-h3-prompt` + build_project_summary 看板状态段 | ✅ | 165 测试；真实 LLM 冒烟（民国旗袍女特工 5.5 分钟全链，23 事件无卡死，小说/简报/剧本/分镜 7 镜落盘）；两 skill 被 harness 目录识别 |
+| P4 设置页 | SettingsDialog 三子菜单（model provider+测试连通 / harness 检测+可调用测试 / 压缩阈值+skill 管理）+ /api/eco + /api/config-agent/test | ✅ | 165 测试（+test_eco 13）；76 modules；冒烟：eco 43 项含 htv skills、kimi 0.36.1 连通、lhh 检测 OK、context_limit 读写回 |
+| P5 文档版本/diff/回滚 | doc_versions 快照/回滚/diff + 前端撤销条/版本历史/diff 高亮 + ai_writer 链式写入快照（P5.1 补） | ✅ | 165 测试；77 modules；冒烟：PUT storyboard→快照→改→回滚→rev/doc.diff 广播 PASS |
+| P6a 后端 AI 全能力 | 7 新工具分支（asset/image-gen/prompt/select/restore/compose-order/settings）+ render 硬前置 403 + selected 幽灵过滤 + compose 按序 + patch reorder（交换镜） | ✅ | 224 测试；18997 冒烟全通（含「给角色C01生成参考图」引导、「交换镜1和镜2」生效） |
+| P6b 前端工作流重构 | 删剧本 AI 按钮 + 角色/场景资产下拉 + 分镜提示词面板（空则禁抽卡）+ 候选播放试看+显式选中 + ShotCard 只读摘要 + 成片编排台（拖拽重排→compose-order） | ✅ | 77 modules；18999 联验：render 403/selected 过滤/order 全过 |
+| P6c T8 融合+配置化 | h3_prompt_enhance LLM 反推（rule/llm 开关）+ /api/workflows 工作流配置化 + /api/config-section + 设置页生图 Provider/工作流区块 | ✅ | 241 测试；18997 冒烟：LLM 反推真对话「阴雨赛博朋克」三段式含描述元素 |
+| P6d skill 工具化 | h3_prompt_enhance 自动加载已装 skill（h3-prompt-writing 官方公式优先）+ skill-create 元 skill + manager skill 分支 + /api/skills（list/install/create）+ 设置页③安装/创建入口；官方 h3-prompt-writing 已装；T8 enhancer 已装 ComfyUI custom_nodes | ✅ | 269 测试；build 77 modules；18999 终验：skills 40 项、workflows/eco 正常、主链路无回归 |
+| P7a 验收修复 | 网格模式内容消失（顶层 ref 解包 .value TypeError，一行修复+全 SFC 扫描）+ 抽卡面板收敛（删模式/参考图下拉，参数全由分镜卡+config 派生；参考图自动关联只读展示）+ 无会话可直接输入自动建会话 | ✅ | build 77 modules；Node 仿真复现→修复验证；18996 冒烟全通；后端零改动 |
+| P5 diff/回滚 | 文档版本 + 撤销 + 打磨 | ⬜ 待定 | — |
+
 ## 3. 后端（DSH）
 
 | 项 | 状态 | 说明 |
@@ -85,3 +104,4 @@
 | **LHH 自动 Loop（Manager→Executor→Auditor）** | 目标 → 内置 LLM Manager 决策下一步 → Executor（外部 adapter 或内置）单步执行 → Auditor（rev/文件校验）→ checkpoint/evidence → 继续/完成 | ✅ `run_loop`（状态机：decide/verify 可注入；状态落 agent/loops/<id>/；4 单测）；**真实冒烟**：kimi 执行改镜1灯光 → Auditor rev 校验通过，1 轮完成（57s）；内置 Manager 无外部 agent 时也能决策（判定无法推进则「完成」） |
 | **LHH 官方仓库复用（模块化 + git pull 同步）** | 项目已 git init；`vendor/longhorizon-harness` = 官方 submodule（v0.1.5 af17ce8）；lhh.py vendor 优先导入，纯逻辑复用（DeepSeekHarnessAdapter/parse_audit_report/HarnessConfig…），Windows 限制已判定（manager.run 依赖 POSIX 原语→stdlib run_loop 驱动循环）；**同步 = git submodule update --remote（接口不变零改动）** | ✅ 实测 vendor 导入 + lhh_status |
 | **业务 Auditor + 配置覆盖 + 前端补全（验收轮）** | 业务校验（分镜可解析/剧本非空/资产完整/成片存在，5 单测）；cli agent-loop（--audit 业务验收）；config.local.json 覆盖机制 + GET/PUT /api/config-agent（设置界面后端契约）；前端：AgentDock 对话模式（ACP 流式气泡）+ 设置面板（适配器/轮数/audit/LHH 状态）+ OnboardPanel 简报回写 + loadAll 选中态保持 | ✅ 全链路验收：4 镜选片→F9 参考图晋升（shot_01~04.png）→ 拼接成片 4MB；ACP 对话两轮会话保持；Loop 冒烟通过；前端 64 modules build；**测试基线 145 全绿** |
+| **前端重构 P0+P1（设计文档 docs/11）** | P0 设置 bug 后端修复（`[]` 解析+类型归一化）；P1 三栏壳：左 AI 栏（会话/对话/输入骨架，可拖宽）/中栏四视图/右栏状态导航（三态折叠），EventTrace 暗夜绿流光垂直进度条组件，删 8 旧组件 | ✅ P0 实测通过；P1 build 66 modules + 冒烟全绿（kimi 交付）；P2 会话+manager 调度进行中 |

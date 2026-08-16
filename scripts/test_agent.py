@@ -208,6 +208,88 @@ class TestAiWriterCompat(unittest.TestCase):
         self.assertEqual(chat.call_args[1]["timeout"], 30)
 
 
+class TestFromScratchWriting(unittest.TestCase):
+    """P4a ① 从零编剧：brief_from_idea / novel_from_idea（想法 → 简报 → 小说素材）。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.old = common.OUTPUT
+        common.OUTPUT = Path(self.tmp.name)
+
+    def tearDown(self):
+        common.OUTPUT = self.old
+        self.tmp.cleanup()
+
+    def test_brief_prompt_has_required_sections(self):
+        p = ai_writer.brief_from_idea_prompt("民国旗袍女特工复仇", "刺玫")
+        for key in ("一句话故事核", "题材与卖点", "目标观众", "整体风格", "主要角色",
+                    "关键场景", "一致性锚点", "约束与红线"):
+            self.assertIn(key, p)
+        self.assertIn("民国旗袍女特工复仇", p)
+        self.assertIn("刺玫", p)
+
+    def test_novel_prompt_has_length_and_brief_block(self):
+        brief = "## 创作简报\n- 风格：民国谍战"
+        p = ai_writer.novel_from_idea_prompt("旗袍女特工复仇", brief, "刺玫")
+        self.assertIn("3000-6000", p)
+        self.assertIn("创作简报", p)
+        self.assertIn("民国谍战", p)
+        self.assertIn("旗袍女特工复仇", p)
+        self.assertIn("C01/S01/P01", p)
+
+    def test_brief_from_idea_writes_file_and_returns_true(self):
+        with mock.patch("ai_writer.llm_available", return_value=(True, "https://b")), \
+                mock.patch("ai_writer.pick_model", return_value="m"), \
+                mock.patch("ai_writer.call_llm", return_value="## 创作简报\n民国谍战"):
+            ok = ai_writer.brief_from_idea("t", "旗袍女特工复仇", "刺玫")
+        self.assertTrue(ok)
+        self.assertIn("民国谍战", ai_writer.read_brief("t"))
+
+    def test_brief_from_idea_skips_when_exists(self):
+        ai_writer.write_brief("t", "已有简报")
+        with mock.patch("ai_writer.llm_available") as avail, \
+                mock.patch("ai_writer.call_llm") as llm:
+            ok = ai_writer.brief_from_idea("t", "想法")
+        self.assertTrue(ok)
+        avail.assert_not_called()
+        llm.assert_not_called()
+        self.assertEqual(ai_writer.read_brief("t"), "已有简报")
+
+    def test_brief_from_idea_no_llm_returns_false(self):
+        with mock.patch("ai_writer.llm_available", return_value=(False, "")):
+            ok = ai_writer.brief_from_idea("t", "想法")
+        self.assertFalse(ok)
+        self.assertEqual(ai_writer.read_brief("t"), "")
+
+    def test_novel_from_idea_writes_file_with_brief(self):
+        ai_writer.write_brief("t", "## 创作简报\n民国谍战")
+        with mock.patch("ai_writer.llm_available", return_value=(True, "https://b")), \
+                mock.patch("ai_writer.pick_model", return_value="m"), \
+                mock.patch("ai_writer.call_llm", return_value="## 第一章\n旗袍女特工潜入…"):
+            ok = ai_writer.novel_from_idea("t", "旗袍女特工复仇", "刺玫",
+                                           ai_writer.read_brief("t"))
+        self.assertTrue(ok)
+        self.assertIn("旗袍女特工潜入", ai_writer.read_novel("t"))
+
+    def test_novel_from_idea_skips_when_novel_exists(self):
+        ai_writer.write_novel("t", "已有小说")
+        with mock.patch("ai_writer.llm_available") as avail, \
+                mock.patch("ai_writer.call_llm") as llm:
+            ok = ai_writer.novel_from_idea("t", "想法", "标题", "")
+        self.assertTrue(ok)
+        avail.assert_not_called()
+        llm.assert_not_called()
+        self.assertEqual(ai_writer.read_novel("t"), "已有小说")
+
+    def test_novel_from_idea_empty_output_returns_false(self):
+        with mock.patch("ai_writer.llm_available", return_value=(True, "https://b")), \
+                mock.patch("ai_writer.pick_model", return_value="m"), \
+                mock.patch("ai_writer.call_llm", return_value="   "):
+            ok = ai_writer.novel_from_idea("t", "想法", "标题", "")
+        self.assertFalse(ok)
+        self.assertEqual(ai_writer.read_novel("t"), "")
+
+
 class TestLlmStoryboard(unittest.TestCase):
     """seam: ai_writer.llm_storyboard / renumber_storyboard_rows（真实 AI 分镜，本轮整改）。"""
 

@@ -4,6 +4,12 @@
   --line: #333845; --fg: #d7dae0; --muted: #8b93a3;
   --accent: #4f8cff; --warn: #ffb454; --danger: #ff6b6b; --ok: #59c97d;
   --mono: Consolas, "Courier New", monospace;
+  /* P1 三栏壳 · 暗夜绿主色调 */
+  --green-deep: #0e3b2e;      /* 暗夜绿深底 */
+  --green-deep-2: #0a2a21;    /* 更深一档（左栏渐变底） */
+  --green: #34d399;           /* 亮绿强调 */
+  --green-soft: #a7f3d0;      /* 浅绿（流光高光） */
+  --green-bg: #0f1a15;        /* 左栏 AI 栏底色（带绿意的暗色） */
 }
 html, body { height: 100%; }
 body {
@@ -12,34 +18,6 @@ body {
   display: flex; flex-direction: column;
 }
 .shell { display: flex; flex-direction: column; height: 100vh; }
-
-/* 顶栏 */
-.topbar { display: flex; align-items: center; gap: 14px; padding: 10px 16px;
-  background: var(--panel); border-bottom: 1px solid var(--line); }
-.topbar .brand { font-weight: 700; color: var(--accent); }
-.topbar .tag { font-size: 11px; color: var(--muted); background: var(--panel2);
-  padding: 1px 8px; border-radius: 10px; }
-.topbar label { color: var(--muted); display: flex; align-items: center; gap: 6px; }
-.topbar select { background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
-  border-radius: 6px; padding: 5px 8px; min-width: 110px; }
-.status { margin-left: auto; font-size: 13px; }
-.status.ok { color: var(--ok); } .status.err { color: var(--danger); }
-.topbar button { border-radius: 6px; padding: 7px 14px; font-size: 13px; cursor: pointer; border: none; }
-.topbar .primary { background: var(--accent); color: #fff; }
-.topbar .primary:disabled { background: var(--line); color: var(--muted); cursor: default; }
-.topbar .ghost { background: var(--panel2); color: var(--fg); border: 1px solid var(--line); }
-.topbar .ghost:disabled { opacity: .5; cursor: default; }
-.topbar .ghost.active { border-color: var(--accent); color: var(--accent); }
-
-
-/* 向导 */
-.wizard { display: flex; gap: 6px; padding: 10px 16px; background: var(--panel);
-  border-bottom: 1px solid var(--line); flex-wrap: wrap; }
-.wz-step { background: none; border: 1px solid var(--line); color: var(--muted);
-  border-radius: 20px; padding: 5px 12px; font-size: 13px; cursor: pointer; }
-.wz-step b { color: var(--accent); margin-right: 4px; }
-.wz-step.done { border-color: var(--ok); color: var(--ok); }
-.wz-step.active { border-color: var(--accent); color: var(--fg); background: var(--panel2); }
 
 /* 布局 */
 .layout { flex: 1; display: flex; min-height: 0; overflow: hidden; }

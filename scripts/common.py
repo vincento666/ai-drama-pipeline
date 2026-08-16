@@ -82,6 +82,8 @@ def parse_yaml_subset(text):
                     node[key] = child["_list"]
                 else:
                     node[key] = child
+            elif value == "[]":
+                node[key] = []  # 空列表字面量（如 claude: args: []），否则会存成字符串 "[]"
             else:
                 node[key] = _unquote(value)
         return node

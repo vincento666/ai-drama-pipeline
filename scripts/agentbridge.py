@@ -91,7 +91,70 @@ def build_project_summary(project, episode=1, max_chars=4000):
             ", ".join("%s %s" % (a["code"], a["name"]) for a in assets[:30])))
     except Exception:
         pass
+    parts.append(_kanban_section(project, episode))
     return "\n".join(parts)
+
+
+def _kanban_section(project, episode=1):
+    """制作看板状态（P4a ③）：轻量文件探测，供外部 agent 快速判断推进哪一步。
+
+    只做文件存在性/行数/计数，不做网络探测（ComfyUI 可用性 = config 有 base_url）。
+    """
+    root = common.project_dir(project)
+    ep_s = "E%02d" % int(episode)
+    e_dir = root / ep_s
+
+    def mark(p):
+        return "✅" if p.exists() else "⬜"
+
+    def size(p):
+        try:
+            return len(p.read_text(encoding="utf-8").strip())
+        except Exception:
+            return 0
+
+    lines = ["\n## 制作看板状态"]
+    rows = [
+        ("创作简报.md", root / ai_writer.BRIEF_FILE),
+        ("小说.md", root / ai_writer.NOVEL_FILE),
+        ("剧本.md", root / ai_writer.SCRIPT_FILE),
+        ("资产清单.md", root / ai_writer.ASSETS_FILE),
+        ("%s/分镜.md" % ep_s, e_dir / "分镜.md"),
+        ("%s/成片.mp4" % ep_s, e_dir / "成片.mp4"),
+    ]
+    for label, p in rows:
+        n = " %d 字" % size(p) if p.exists() else ""
+        lines.append("- %s %s%s" % (mark(p), label, n))
+    # 分镜行数（load_storyboard 或行数统计，try/except 容错）
+    sb = e_dir / "分镜.md"
+    n_shots = 0
+    if sb.exists():
+        try:
+            n_shots = len(gen_storyboard.load_storyboard(sb))
+        except Exception:
+            try:
+                n_shots = sum(1 for ln in sb.read_text(encoding="utf-8",
+                                                       errors="ignore").splitlines()
+                              if ln.strip().startswith("|") and "镜号" not in ln)
+            except Exception:
+                n_shots = 0
+    lines.append("- 分镜镜数：%d 镜" % n_shots)
+    # 已选片数量（shots/*.mp4 顶层计数，候选在 .candidates/ 不计）
+    picked = 0
+    shots_dir = e_dir / "shots"
+    if shots_dir.exists():
+        try:
+            picked = len([f for f in shots_dir.glob("*.mp4") if f.is_file()])
+        except Exception:
+            picked = 0
+    lines.append("- %s/shots/ 已选片：%d 个（候选在 .candidates/）" % (ep_s, picked))
+    # ComfyUI 可用性（配置存在即可，不做网络探测，避免慢）
+    try:
+        base = common.load_config().get_path("comfyui.base_url", "")
+        lines.append("- ComfyUI：%s%s" % (base or "未配置", "（配置存在，未探测）" if base else ""))
+    except Exception:
+        lines.append("- ComfyUI：未知")
+    return "\n".join(lines)
 
 
 # ============ 流程推进模板（对话窗快捷卡，spec 10） ============
@@ -628,6 +691,282 @@ class AcpAdapter(AgentAdapter):
             elif frame.get("id") == rid:   # 响应帧 = 完成
                 break
         return "".join(message_parts), updates
+
+
+# ============ P7c RoundAdapter：回合式外派执行器（对齐 LHH run_episode 语义） ============
+
+_MUTATING_TOOL_HINTS = (
+    "write", "edit", "patch", "apply", "insert", "replace", "delete", "remove",
+    "bash", "shell", "run", "mkdir", "move", "copy", "rename", "rm",
+    "multi_edit", "notepad", "create", "save",
+)
+
+
+def build_round_prompt(goal, ctx="", tools_desc="", skills="", max_chars=4000):
+    """回合任务 prompt（对齐 LHH build_role_executor_prompt 形态）：
+
+    目标 + 项目上下文（工作区=项目目录）+ 宿主可用工具契约 + 相关 skill 指引。
+    """
+    parts = ["# 回合任务（Round，对齐 LongHorizon-Harness run_episode）\n"]
+    parts.append("## 目标\n%s" % (goal or "").strip())
+    if ctx:
+        parts.append("\n## 项目上下文（工作区 = 项目目录，可直接读写下列文件）\n%s"
+                     % str(ctx)[:max_chars])
+    if tools_desc:
+        parts.append("\n## 宿主可用工具（契约注入：宿主可代执行；你也可以用自身原生工具）\n%s"
+                     % str(tools_desc))
+    if skills:
+        parts.append("\n## 相关 skill 指引（遵循其规范执行）\n%s" % str(skills)[:max_chars])
+    parts.append("\n## 要求\n"
+                 "1) 在当前工作区内自主调用工具完成任务；\n"
+                 "2) 需要读写项目文档时直接用你的文件工具（Read/Write/Edit/Bash 等）；\n"
+                 "3) 完成后总结：改动了哪些文件、结果如何。")
+    return "\n\n".join(parts)
+
+
+def _tool_names_from_content(content):
+    """ACP content 块列表 → 工具名列表（type=tool_call 块）。"""
+    out = []
+    if isinstance(content, list):
+        for c in content:
+            if isinstance(c, dict) and c.get("type") == "tool_call" and c.get("name"):
+                out.append(c["name"])
+    return out
+
+
+class RoundAdapter(AcpAdapter):
+    """回合式外派执行器（P7c，对齐 LHH AgentAdapter.run_episode(prompt, env)）。
+
+    一次 run_round = 一个 ACP 回合（复用 AcpAdapter 常驻会话）：
+      启动会话 → 发送回合 prompt（目标+上下文+工具契约+skill 指引）→
+      流式收集 thinking / message / tool_call（session/update）→
+      经 on_event 上报宿主（转 trace 事件）→ 响应帧 stopReason → 结构化回执。
+
+    回执：{status: done|error|needs_info, summary, changes, tool_trace, rounds, session_id}
+      - changes    从 tool_call 轨迹提取的「文件改动猜测」（写类工具名）
+      - tool_trace [{name, status}]（status ∈ started/done/error）
+    多轮：continue_round(instruction) 同会话续回合（宿主补充指令）。
+    max_steps 工具调用超限 → needs_info（可 continue_round 继续）。
+    """
+
+    name = "round"
+
+    def __init__(self, cwd=None, session_id=None, config=None, cli=None, max_steps=30):
+        super().__init__(cwd=cwd, session_id=session_id, config=config)
+        if cli:
+            self.cli = cli
+        self.max_steps = int(max_steps or 30)
+
+    def _cancel(self):
+        """尝试取消当前回合（ACP v2 session/cancel；不支持则静默）。"""
+        try:
+            self._write({"jsonrpc": "2.0", "method": "session/cancel",
+                         "params": {"sessionId": self.session_id}})
+        except Exception:
+            pass
+
+    def run_round(self, goal, ctx="", tools_desc="", skills="", on_event=None,
+                  max_steps=None, timeout=900):
+        """执行一个回合：发送回合任务 prompt → 流式收集 → 结构化回执。"""
+        self.start()
+        prompt = build_round_prompt(goal, ctx, tools_desc, skills)
+        self._rid += 1
+        rid = self._rid
+        self._write({"jsonrpc": "2.0", "id": rid, "method": "session/prompt",
+                     "params": {"sessionId": self.session_id,
+                                "prompt": [{"type": "text", "text": prompt}]}})
+        message_parts, thought_parts = [], []
+        tools = {}            # toolCallId -> {"name", "status", "order"}
+        order = [0]
+        status = "error"
+        error = ""
+        stop_reason = ""
+        end = time.time() + timeout
+        while time.time() < end:
+            try:
+                frame = json.loads(self._q.get(timeout=0.3))
+            except queue.Empty:
+                continue
+            m = frame.get("method")
+            if m == "session/update":
+                p = frame.get("params") or {}
+                if p.get("state") == "interrupted":
+                    status, error = "error", "ACP 会话被中断"
+                    break
+                up = p.get("update") or {}
+                kind = up.get("sessionUpdate") or ""
+                content = up.get("content") or {}
+                if kind == "agent_message_chunk" and isinstance(content, dict) and content.get("text"):
+                    message_parts.append(content["text"])
+                    if on_event:
+                        try:
+                            on_event({"type": "message", "text": content["text"]})
+                        except Exception:
+                            pass
+                elif kind == "agent_thought_chunk" and isinstance(content, dict) and content.get("text"):
+                    thought_parts.append(content["text"])
+                    if on_event and len(thought_parts) == 1:
+                        try:
+                            on_event({"type": "thinking", "text": content["text"], "first": True})
+                        except Exception:
+                            pass
+                elif kind in ("tool_call", "tool_call_update", "tool_result"):
+                    tcid = up.get("toolCallId") or up.get("tool_call_id") or ""
+                    name = up.get("title") or up.get("name") or ""
+                    st = str(up.get("status") or "started").lower()
+                    if kind == "tool_call":
+                        # 新工具调用开始
+                        if tcid not in tools:
+                            order[0] += 1
+                            tools[tcid] = {"name": name or "?", "status": "started",
+                                           "order": order[0]}
+                            if on_event:
+                                try:
+                                    on_event({"type": "tool_call", "name": name or "?",
+                                              "id": tcid, "status": "started"})
+                                except Exception:
+                                    pass
+                    elif tcid in tools:
+                        # 完成/错误
+                        if st == "completed":
+                            tools[tcid]["status"] = "done"
+                            if on_event:
+                                try:
+                                    on_event({"type": "tool_call", "name": tools[tcid]["name"],
+                                              "id": tcid, "status": "done"})
+                                except Exception:
+                                    pass
+                        elif st in ("error", "failed"):
+                            tools[tcid]["status"] = "error"
+                            if on_event:
+                                try:
+                                    on_event({"type": "tool_call", "name": tools[tcid]["name"],
+                                              "id": tcid, "status": "error"})
+                                except Exception:
+                                    pass
+                # max_steps 工具调用数超限 → 中断回合，返回 needs_info
+                if len(tools) >= int(max_steps if max_steps is not None else self.max_steps):
+                    self._cancel()
+                    status, error = "needs_info", (
+                        "工具调用超过 %d 次上限，回合中断（可 continue_round 继续）"
+                        % (max_steps if max_steps is not None else self.max_steps))
+                    break
+            elif m == "session/result":      # 兼容其它实现：结果通知
+                p = frame.get("params") or {}
+                res = p.get("result") or {}
+                for block in _text_blocks(res):
+                    message_parts.append(block)
+                    if on_event:
+                        try:
+                            on_event({"type": "message", "text": block})
+                        except Exception:
+                            pass
+                for name in _tool_names_from_content((res.get("message") or {}).get("content")):
+                    if not any(t["name"] == name for t in tools.values()):
+                        order[0] += 1
+                        tools["m%d" % order[0]] = {"name": name, "status": "done",
+                                                   "order": order[0]}
+                        if on_event:
+                            try:
+                                on_event({"type": "tool_call", "name": name,
+                                          "status": "done"})
+                            except Exception:
+                                pass
+                status = "done"
+                break
+            elif frame.get("id") == rid:     # 响应帧 = 完成
+                res = frame.get("result") or {}
+                stop_reason = str(res.get("stopReason") or res.get("stop_reason") or "")
+                for name in _tool_names_from_content((res.get("message") or {}).get("content")):
+                    if not any(t["name"] == name for t in tools.values()):
+                        order[0] += 1
+                        tools["m%d" % order[0]] = {"name": name, "status": "done",
+                                                   "order": order[0]}
+                        if on_event:
+                            try:
+                                on_event({"type": "tool_call", "name": name,
+                                          "status": "done"})
+                            except Exception:
+                                pass
+                if stop_reason in ("end_turn", "done", "complete", "success"):
+                    status = "done"
+                elif stop_reason in ("max_tokens", "cancelled", "interrupted"):
+                    status, error = "needs_info", "回合停止：stopReason=%s" % stop_reason
+                else:
+                    status = "done" if message_parts else "error"
+                    if not message_parts:
+                        error = "回合无文本输出（stopReason=%s）" % stop_reason
+                break
+        else:
+            status, error = "error", "回合超时（%ss）" % timeout
+        return self._receipt(status, message_parts, thought_parts, tools, error)
+
+    def continue_round(self, instruction, on_event=None, max_steps=None, timeout=900):
+        """同会话续回合：宿主补充指令（上下文/工具契约已在会话内）。"""
+        return self.run_round(instruction, ctx="", tools_desc="", skills="",
+                              on_event=on_event, max_steps=max_steps, timeout=timeout)
+
+    def _receipt(self, status, message_parts, thought_parts, tools, error=""):
+        """构建结构化回执。"""
+        tool_trace = [{"name": t["name"], "status": t["status"]}
+                      for _, t in sorted(tools.items(), key=lambda kv: kv[1]["order"])]
+        changes = []
+        for name in {t["name"] for t in tool_trace}:
+            low = (name or "").lower()
+            if any(h in low for h in _MUTATING_TOOL_HINTS):
+                changes.append({"tool": name, "note": "可能改动项目文件"})
+        summary = "".join(message_parts).strip() or (error or "（无文本输出）")
+        return {
+            "status": status,
+            "summary": summary[:2000],
+            "changes": changes,
+            "tool_trace": tool_trace,
+            "rounds": 1,
+            "session_id": self.session_id,
+            "thought_chars": sum(len(x) for x in thought_parts),
+            "error": error or None,
+        }
+
+    # ---- 兼容 CLITaskAdapter 的 execute 形态（run_loop / run_task 可复用） ----
+    def execute(self, cwd, prompt_text, on_line=None, timeout=1800):
+        """把整段 prompt 当作一个回合目标执行 → (exit_code, stdout)。"""
+        try:
+            receipt = self.run_round(prompt_text, on_event=None, timeout=timeout)
+        except Exception as ex:
+            return 1, "回合执行失败: %s" % ex
+        code = 0 if receipt["status"] == "done" else 1
+        if on_line:
+            try:
+                on_line(receipt["summary"])
+            except Exception:
+                pass
+        return code, receipt["summary"]
+
+
+def pick_delegate_adapter(cfg=None, name=None, cwd=None):
+    """delegate_mode（config agent.delegate_mode：acp|cli）选择外派适配器。
+
+    - acp（默认，且默认 agent 为 kimi 且 kimi 可用）→ RoundAdapter；
+    - 否则回退 cli → get_adapter(name)（CLITaskAdapter 单发）。
+    返回的 adapter 带 delegate_mode 属性（'acp' | 'cli'），供事件文案区分。
+    """
+    cfg = cfg or common.load_config()
+    name = (name or (cfg.get_path("agent.default", "") or "kimi")).strip() or "kimi"
+    mode = str(cfg.get_path("agent.delegate_mode", "") or "").strip().lower()
+    if not mode:
+        mode = "acp" if shutil.which("kimi") else "cli"
+    if mode == "acp" and name == "kimi":
+        try:
+            a = RoundAdapter(cwd=cwd)
+            if a.available():
+                a.delegate_mode = "acp"
+                return a
+        except Exception:
+            pass
+        mode = "cli"                       # acp 不可用 → 回退 cli
+    a = get_adapter(name)
+    a.delegate_mode = "cli"
+    return a
 
 
 # ============ Manager 单轮调度 ============

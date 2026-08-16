@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import common           # noqa: E402
+import ai_writer        # noqa: E402（P4a ③：看板段文件探测）
 import agentbridge      # noqa: E402
 
 
@@ -81,6 +82,37 @@ class TestBuildProjectSummary(unittest.TestCase):
         s = agentbridge.build_project_summary("empty", 1)
         self.assertIn("empty", s)
         self.assertIn("0 镜", s)
+
+    def test_summary_has_kanban_section_with_marks(self):
+        """P4a ③：制作看板状态段——文件存在性/镜数/已选片/ComfyUI 配置。"""
+        p = common.project_dir("t")
+        (p / ai_writer.BRIEF_FILE).write_text("## 创作简报\n民国", encoding="utf-8")
+        (p / ai_writer.NOVEL_FILE).write_text("小说", encoding="utf-8")
+        e = common.episode_dir("t", 1)
+        (e / "分镜.md").write_text(
+            "| 镜号 | 景别 |\n|---|---|\n| 1 | wide |\n| 2 | medium |\n", encoding="utf-8")
+        (e / "shots").mkdir(exist_ok=True)
+        (e / "shots" / "shot_01.mp4").write_bytes(b"x")
+        (e / "shots" / "shot_02.mp4").write_bytes(b"x")
+        s = agentbridge.build_project_summary("t", 1)
+        self.assertIn("## 制作看板状态", s)
+        self.assertIn("✅ 创作简报.md", s)
+        self.assertIn("✅ 小说.md", s)
+        self.assertIn("⬜ 剧本.md", s)
+        self.assertIn("分镜镜数：2 镜", s)
+        self.assertIn("已选片：2 个", s)
+        self.assertIn("ComfyUI", s)
+
+    def test_kanban_shot_count_ignores_candidates(self):
+        e = common.episode_dir("t", 1)
+        (e / "分镜.md").write_text(
+            "| 镜号 | 景别 |\n|---|---|\n| 1 | wide |\n", encoding="utf-8")
+        cand = e / "shots" / ".candidates"
+        cand.mkdir(parents=True, exist_ok=True)
+        (e / "shots" / "shot_01.mp4").write_bytes(b"x")
+        (cand / "shot_01_01.mp4").write_bytes(b"x")   # 候选不计入已选片
+        s = agentbridge.build_project_summary("t", 1)
+        self.assertIn("已选片：1 个", s)
 
 
 class TestGetAdapter(unittest.TestCase):

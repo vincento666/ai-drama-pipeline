@@ -26,10 +26,10 @@ llm:
       base: http://127.0.0.1:11434/v1   # Ollama 等本地 OpenAI 兼容服务
       model: qwen2.5:7b
       api_key: ""
-  # ↓ 旧键（兼容层：providers 未命中时的 custom 兜底）
+  # ↓ 旧键（兼容层：providers 未命中时的 custom 兜底；真实 api_key 放 config.local.json 覆盖层，不入库）
   base: https://api.deepseek.com
   model: deepseek-v4-flash
-  api_key: sk-e62fdb05b59b436f8955ec8e91316277
+  api_key: ""
 
 # ---------- H3 权重（模型名须与 ComfyUI 中实际文件名一致） ----------
 # 2026-08-10 按本机 ComfyUI_windows_portable\ComfyUI\models 实际文件校准
@@ -41,6 +41,7 @@ h3:
   audio_vae: minimax_h3_audio_vae_fp32.safetensors
   text_encoder: qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors
   turbo_lora: minimax_h3_turbo_4步加速ema_comfyui.safetensors  # 4 步采样加速 LoRA
+  prompt_enhance: rule        # 分镜提示词生成模式：rule（规则组装，默认）| llm（LLM 反推，失败自动回退 rule）；config.local.json 可覆盖
 
 # ---------- 生成默认参数（h3-studio 社区基线） ----------
 generate:

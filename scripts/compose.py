@@ -31,8 +31,20 @@ def build_concat_list(files, list_path: Path):
 
 
 def compose(shots_dir: Path, out_path: Path, ffmpeg: str = "ffmpeg", fps: int = 24,
-            dry_run: bool = False):
-    files = find_shots(shots_dir)
+            dry_run: bool = False, order=None):
+    """按镜号顺序拼接：order 为镜号数组（如 [1,3,2]）时按序取 shots/shot_XX.mp4；
+    order 为 None → 按文件名排序（默认分镜行顺序）。"""
+    if order is not None:
+        files = []
+        for n in order:
+            f = shots_dir / ("shot_%02d.mp4" % int(n))
+            if f.exists():
+                files.append(f)
+        if not files:
+            print("[警告] %s 里没有与 order 匹配的视频文件" % shots_dir)
+            return False
+    else:
+        files = find_shots(shots_dir)
     if not files:
         print("[警告] %s 里没有视频文件（.mp4/.mov/.mkv/.webm）" % shots_dir)
         return False
