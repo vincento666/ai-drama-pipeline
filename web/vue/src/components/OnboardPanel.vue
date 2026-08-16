@@ -43,11 +43,11 @@
         </div>
       </template>
 
-      <!-- 第三步：创作简报（可编辑预览；内容由后端在生成时写入 创作简报.md） -->
+      <!-- 第三步：创作简报（可编辑预览；生成时后端已落盘，编辑经 PUT /api/brief 回写） -->
       <template v-else>
         <p class="hint">创作简报已写入项目 创作简报.md，将作为后续编剧/分镜的一致性锚点。下方可编辑预览。</p>
         <textarea v-model="brief" rows="12" class="ob-brief mono" @input="briefDirty = true"></textarea>
-        <p v-if="briefDirty" class="hint warn">已编辑（仅本地预览，未回写——暂无单独保存接口，一键生成仍用磁盘上的简报）</p>
+        <p v-if="briefDirty" class="hint warn">已编辑——保存时会先回写 创作简报.md 再一键生成</p>
         <div class="ob-ops">
           <button class="primary" :disabled="genBusy" @click="saveAndGenerate">保存简报并一键生成</button>
           <button class="ghost" @click="restart">重新访谈</button>
@@ -63,10 +63,10 @@
 // 契约：POST /api/onboard/<项目> {description, answers:[{q,a}], want:'questions'|'brief'}
 //   want=questions → {ok, questions:[str]}（同步返回，一轮 3-5 问）
 //   want=brief     → {ok, brief, path}（后端已写入 创作简报.md）
-// 已知边界：后端暂无「读取/回写简报」接口——存在性用 localStorage 标记（成功出简报后置位），
-// 简报内容仅本次访谈会话内可见；预览区编辑不回写（见 dirty 提示）。
+// 已知边界：后端暂无「读取简报」GET 接口——存在性用 localStorage 标记（成功出简报后置位），
+// 简报内容仅本次访谈会话内可见；预览区编辑经 PUT /api/brief 回写（见 saveAndGenerate）。
 import { ref, computed, watch, inject, onMounted } from 'vue'
-import { postOnboard } from '../api'
+import { postOnboard, putBrief } from '../api'
 
 defineProps({ genBusy: { type: Boolean, default: false } })
 const emit = defineEmits(['generate'])
@@ -164,8 +164,14 @@ async function makeBrief() {
   finally { busy.value = false }
 }
 
-// 「保存简报并一键生成」：简报已由后端落盘，这里触发现有一键 AI 编剧链路（ScriptPanel.runAll）
-function saveAndGenerate() {
+// 「保存简报并一键生成」：简报在生成时已落盘；若预览里改过，先 PUT 回写再触发一键编剧（ScriptPanel.runAll）
+async function saveAndGenerate() {
+  if (briefDirty.value) {
+    try {
+      await putBrief(store.project.value, brief.value)
+      briefDirty.value = false
+    } catch (e) { status.value = '简报回写失败：' + e.message; errCls.value = 'err'; return }
+  }
   emit('generate')
   status.value = '已触发一键 AI 编剧——进度与结果见下方编剧区'
   errCls.value = ''

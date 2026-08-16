@@ -98,6 +98,7 @@ const rulerTicks = computed(() => {
 })
 
 async function loadAll() {
+  const keepSel = sel.value   // 重载后保持选中（canvasTick/rev watcher 触发的刷新不清空检查器）
   try {
     const [p, cv, voc] = await Promise.all([
       api(`/api/project/${enc(project.value)}`),
@@ -109,7 +110,7 @@ async function loadAll() {
     refsByShot.value = Object.fromEntries(((cv.storyboard && cv.storyboard.refs) || []).map(r => [r.shot, r]))
     store.epStatus.value = { selected: (cv.status && cv.status.selected) || [], composed: !!(cv.status && cv.status.composed) }
     vocab.value = voc
-    sel.value = -1
+    sel.value = (keepSel >= 0 && keepSel < rows.value.length) ? keepSel : -1
     loadCandCounts()
   } catch (e) { store.setStatus('加载失败: ' + e.message, 'err') }
 }

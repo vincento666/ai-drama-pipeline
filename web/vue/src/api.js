@@ -44,3 +44,22 @@ export const postAgentTask = (project, goal, agent, context = '') => api('/api/a
 })
 // 委派任务详情：GET /api/agent-task/<项目>/<task_id> → {status, transcript:[行], result}
 export const getAgentTask = (project, taskId) => api(`/api/agent-task/${enc(project)}/${enc(taskId)}`)
+
+// ACP 交互对话（spec 11，多轮同会话，工作区=项目目录）：POST {project, text} → {job, status}
+export const postAgentChat = (project, text) => api('/api/agent-chat', {
+  method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ project, text }),
+})
+// 对话 job 轮询：GET /api/agent-chat/status/<job> → {status, message, lines:[流式行], reply, session_id}
+export const getAgentChatStatus = (job) => api(`/api/agent-chat/status/${enc(job)}`)
+
+// Agent 设置：GET → {ok, agent:{default,max_rounds,audit,adapters}, lhh:{available,source,...}}；
+// PUT {agent} 保存到 config.local.json（覆盖 config.yaml 的 agent 段）
+export const getConfigAgent = () => api('/api/config-agent')
+export const putConfigAgent = (agent) => api('/api/config-agent', {
+  method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ agent }),
+})
+
+// 创作简报回写：PUT /api/brief/<项目> {brief} → {ok, path}
+export const putBrief = (p, brief) => api(`/api/brief/${enc(p)}`, {
+  method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ brief }),
+})
