@@ -788,6 +788,26 @@ class RoundAdapter(AcpAdapter):
             except queue.Empty:
                 continue
             m = frame.get("method")
+            if m == "session/request_permission":
+                # ACP 权限请求（写文件等操作需宿主批准）：自动批准首个 allow 选项。
+                # 客户端须以「同 id 的 JSON-RPC 响应」回复 outcome=selected（v2 协议）；
+                # delegate 语义 = 授权外部 agent 改项目文件（对应 CLI mode=auto）。
+                p = frame.get("params") or {}
+                opts = p.get("options") or []
+                pick = next((o for o in opts
+                             if str(o.get("kind") or "").startswith("allow")), None)
+                if pick is None:
+                    pick = next((o for o in opts
+                                 if str(o.get("kind") or "").startswith("reject")), None)
+                if pick is not None:
+                    try:
+                        self._write({"jsonrpc": "2.0", "id": frame.get("id"),
+                                     "result": {"outcome": {
+                                         "outcome": "selected",
+                                         "optionId": pick.get("optionId")}}})
+                    except Exception:
+                        pass
+                continue
             if m == "session/update":
                 p = frame.get("params") or {}
                 if p.get("state") == "interrupted":

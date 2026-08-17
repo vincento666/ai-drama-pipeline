@@ -428,10 +428,154 @@ def _tools_contract(skills=None):
         lines.append("· %s：%s" % (t["id"], t["desc"]))
     return "\n".join(lines)
 
+
+# ============ P7c 统一总结环节（外派/工具环完成 → LLM 总结器 → 落盘） ============
+# 对应 DSH「subagent 后台跑完 → 结算通知 → 宿主总结输出」事件驱动范式：
+#   handler（后台线程）完成时 _set_summarize 标记请求 → _run_turn 收尾统一唤起
+#   _summarize_turn：LLM(agent.chat) 读 结构化回执+原始目标+会话最近上下文 →
+#   {做了什么, 产物/变更, 问题/风险, 建议下一步}（中文）→ assistant 消息
+#   （meta 含 {mode, tool_trace 摘要}）+ session.msg SSE + trace「回合完成 · 已总结」；
+#   LLM 失败/不可解析 → 回执原文兜底（绝不阻塞回合收尾）。
+
+_SUMMARIZE_MODE_LABEL = {
+    "acp": "外派回合（ACP）",
+    "cli": "外派（CLI）",
+    "tool_loop": "内派工具环",
+}
+
+
+def _set_summarize(text, ctx, mode, receipt):
+    """回合内标记总结请求（handler 完成时调用；_run_turn 收尾统一执行）。"""
+    try:
+        _CUR.summarize = {"mode": mode, "goal": text, "ctx": ctx,
+                          "receipt": receipt or {}}
+    except Exception:
+        pass
+
+
+def _tool_trace_brief(tool_trace):
+    """tool_trace → 摘要串（如 Read×2 · Edit×1）。"""
+    if not tool_trace:
+        return ""
+    from collections import Counter
+    cnt = Counter((t.get("name") or "?").strip() or "?" for t in tool_trace)
+    return " · ".join("%s×%d" % (n, c) for n, c in sorted(cnt.items()))
+
+
+def _parse_summary_json(text):
+    """总结器输出 → dict（容错：整段 JSON / 提取 {...} 块，须含已知键）；失败 None。"""
+    t = (text or "").strip()
+    if not t:
+        return None
+    keys = ("做了什么", "产物/变更", "问题/风险", "建议下一步")
+    try:
+        d = json.loads(t)
+        if isinstance(d, dict) and any(k in d for k in keys):
+            return d
+    except Exception:
+        pass
+    m = re.search(r"\{.*\}", t, re.S)
+    if m:
+        try:
+            d = json.loads(m.group(0))
+            if isinstance(d, dict) and any(k in d for k in keys):
+                return d
+        except Exception:
+            pass
+    return None
+
+
+def _summarize_turn(project, session_id, task_id, req, cfg):
+    """统一总结环节（外派 acp/cli 与内派工具环共用；成功/失败/needs_info 均触发）。
+
+    输入 req: {mode, goal, ctx, receipt}；receipt = 结构化回执
+    （summary / tool_trace / changes / rounds）。
+    流程：LLM(agent.chat) 总结 → 结构化中文总结 → trace 事件
+    「回合完成 · 已总结（N 轮 · M 次工具调用）」success → 返回 (总结文本, meta)。
+    落盘（assistant 消息 + session.msg）由 _run_turn 收尾统一做；meta 供 assistant 消息携带。
+    LLM 失败/输出不可解析 → 回执原文兜底（静默，不抛异常）。
+    """
+    mode = req.get("mode") or "tool_loop"
+    receipt = req.get("receipt") or {}
+    goal = (req.get("goal") or "").strip()
+    ctx = req.get("ctx") or ""
+    tool_trace = receipt.get("tool_trace") or []
+    rounds = receipt.get("rounds") or 0
+    changes = receipt.get("changes") or []
+    n_tools = len(tool_trace)
+    brief = _tool_trace_brief(tool_trace)
+    raw_summary = (receipt.get("summary") or "").strip() \
+        or (receipt.get("error") or "").strip()
+    label = _SUMMARIZE_MODE_LABEL.get(mode, mode)
+
+    # 1) LLM 总结器（结构化回执 + 原始目标 + 会话最近上下文）
+    summary_text = ""
+    try:
+        prov = agent.resolve_provider(cfg)
+        receipt_json = json.dumps({
+            "status": receipt.get("status"),
+            "summary": raw_summary[:800],
+            "tool_trace": tool_trace[:20],
+            "changes": changes[:10],
+            "rounds": rounds,
+            "error": receipt.get("error"),
+        }, ensure_ascii=False)
+        prompt = (
+            "你是 AI 短剧流水线的回合总结器（DSH 结算通知）。\n"
+            "执行器（%s）刚完成一个回合。基于【原始目标】【会话最近上下文】【执行回执】，"
+            "输出一行 JSON 结构化总结（中文、简洁，每项一句话）：\n"
+            "{\"做了什么\": \"...\", \"产物/变更\": \"...\", "
+            "\"问题/风险\": \"...\", \"建议下一步\": \"...\"}\n"
+            "只输出 JSON 本身，不要多余文字。\n\n"
+            "【原始目标】\n%s\n\n【会话最近上下文（节选）】\n%s\n\n【执行回执】\n%s"
+            % (label, goal[:500], str(ctx)[:800], receipt_json))
+        out = agent.chat(prov["base"], prov["model"], prov["api_key"],
+                         [{"role": "system", "content": agent.SYSTEM_PROMPT},
+                          {"role": "user", "content": prompt}],
+                         temperature=0.3, max_tokens=1024, timeout=120)
+        data = _parse_summary_json(out)
+        if data:
+            lines = ["**回合总结（%s）**" % label]
+            for k in ("做了什么", "产物/变更", "问题/风险", "建议下一步"):
+                v = str(data.get(k) or "").strip()
+                if v:
+                    lines.append("- %s：%s" % (k, v))
+            summary_text = "\n".join(lines)
+    except Exception:
+        summary_text = ""
+
+    # 2) 兜底：LLM 失败/不可解析 → 回执原文（不阻塞收尾）
+    if not summary_text:
+        if raw_summary:
+            summary_text = ("**回合总结（%s）**\n- 做了什么：%s"
+                            % (label, raw_summary[:400]))
+        else:
+            summary_text = "回合未产出可总结内容（status=%s）。" \
+                % (receipt.get("status") or "?")
+
+    # 3) trace 事件「回合完成 · 已总结（N 轮 · M 次工具调用）」success
+    try:
+        _ev_terminal(project, session_id, task_id, "tool",
+                     "回合完成 · 已总结（%s）" % label, "success",
+                     "%d 轮 · %d 次工具调用%s"
+                     % (rounds, n_tools, (" · %s" % brief) if brief else ""))
+    except Exception:
+        pass
+
+    meta = {
+        "mode": mode,
+        "rounds": rounds,
+        "tool_trace": tool_trace[:30],
+        "tool_trace_brief": brief,
+        "changes": changes[:10],
+        "summarized": True,
+    }
+    return summary_text, meta
+
 _GREET_RE = re.compile(
     r"^\s*(?:你好|您好|hi|hello|嗨|哈喽|在吗|在不在)[!！。.\s]*$", re.I)
 
-_CUR = threading.local()      # 当前回合 episode（_run_turn 设置，_ev 做 rev/doc.diff 广播用）
+_CUR = threading.local()      # 当前回合 episode + 总结请求（_run_turn 设置，_ev/_summarize 用）
 
 
 def _doc_of(title):
@@ -632,6 +776,7 @@ def _close_running_events(project, session_id, task_id, reply, ok):
 def _run_turn(session_id, project, text, episode, task_id):
     """后台执行一次回合：分派 → 执行 → 事件/任务/消息收尾。"""
     _CUR.episode = episode       # P3：回合 episode 供 _ev 做 rev/doc.diff 广播
+    _CUR.summarize = None        # P7c：回合总结请求（外派/工具环 handler 设置）
     cfg = common.load_config()
     session = session_store.get_session(project, session_id) or {}
     ctx = _build_context(project, episode, session, cfg)
@@ -671,6 +816,17 @@ def _run_turn(session_id, project, text, episode, task_id):
     # 保证 tool 消息里的全量事件也带终态；顺序 = 追加顺序，紧跟对应 running 之后）
     _close_running_events(project, session_id, task_id, reply, ok)
 
+    # P7c：统一总结环节——外派（acp/cli）与内派工具环完成时（含失败/needs_info）
+    # 唤起 _summarize_turn（LLM 总结器）；总结文本作为最终回复，meta 进 assistant 消息
+    sum_meta = {}
+    try:
+        sum_req = getattr(_CUR, "summarize", None)
+        if sum_req is not None:
+            reply, sum_meta = _summarize_turn(project, session_id, task_id,
+                                              sum_req, cfg)
+    except Exception:
+        pass
+
     # 收尾：tool 消息（本回合事件回执，前端渲染为 EventTrace）+ assistant 回复
     evs = session_store.list_events(project, session_id, limit=200,
                                     task_id=task_id).get("events") or []
@@ -682,8 +838,10 @@ def _run_turn(session_id, project, text, episode, task_id):
         except Exception:
             pass
     try:
+        msg_meta = {"task_id": task_id, "intent": intent}
+        msg_meta.update(sum_meta)     # P7c：{mode, rounds, tool_trace, tool_trace_brief, changes}
         session_store.add_message(project, session_id, "assistant", reply,
-                                  {"task_id": task_id, "intent": intent})
+                                  msg_meta)
     except Exception:
         pass
     # P3：流式推送（docs/11 §9.3）——v1 = 回复完成后推整段 + 空 chunk 收尾；
@@ -976,17 +1134,23 @@ def _delegate_round(session_id, project, episode, text, task_id, ctx, cfg,
     try:
         receipt = adapter.run_round(text, ctx=ctx, tools_desc=tools_desc,
                                     skills=skills_text, on_event=on_event,
-                                    max_steps=30, timeout=900)
+                                    max_steps=30, timeout=1500)
     except Exception as ex:
         _ev(project, session_id, task_id, "tool", title, "error", str(ex)[:200])
         _ev(project, session_id, task_id, "subtask", subtask_title,
             "error", str(ex)[:200])
+        # 失败也要总结（问题+修复建议）
+        _set_summarize(text, ctx, "acp", {"status": "error", "summary": "",
+                                          "tool_trace": [], "changes": [],
+                                          "rounds": 1, "error": str(ex)[:300]})
         return "外派回合失败：%s" % ex
     n_tools = len(receipt.get("tool_trace") or [])
     n_changes = len(receipt.get("changes") or [])
     st = receipt.get("status")
     summary = (receipt.get("summary") or "").strip()
     done_title = "%s完成：%s（ACP）" % (tool_label, cli_name)
+    # P7c：完成（成功/失败/needs_info）→ 唤起统一总结环节
+    _set_summarize(text, ctx, "acp", receipt)
     if st == "done":
         _ev(project, session_id, task_id, "tool", done_title, "success",
             "完成 %d 轮 · %d 次工具调用%s"
@@ -1025,6 +1189,17 @@ def _delegate_cli(session_id, project, episode, text, task_id, ctx, cfg,
     exit_code = (res.get("result") or {}).get("exit_code")
     exit_code = exit_code if exit_code is not None else "?"
     n_lines = len(res.get("transcript") or [])
+    # P7c：CLI 单发也走统一总结环节（回执构造：summary + transcript 行数）
+    cli_receipt = {
+        "status": "done" if res.get("status") == "done" else "error",
+        "summary": (res.get("result") or {}).get("summary")
+        or (res.get("result") or {}).get("exit_code", "") or "外部 agent 无文本输出",
+        "tool_trace": [{"name": "cli", "status": "done"}],
+        "changes": [], "rounds": 1,
+        "error": None if res.get("status") == "done"
+        else "exit=%s · transcript %d 行" % (exit_code, n_lines),
+    }
+    _set_summarize(text, ctx, "cli", cli_receipt)
     if res.get("status") != "done":
         _ev(project, session_id, task_id, "tool", tool_title,
             "error", "外部 agent 执行失败：exit=%s · transcript %d 行"
@@ -1094,6 +1269,8 @@ def _run_default(session_id, project, episode, text, task_id, ctx, cfg):
                 % (receipt.get("rounds") or 0, n_trace))
             _ev(project, session_id, task_id, "subtask", "内派工具环",
                 "success", "工具环完成")
+            # P7c：工具环完成 → 统一总结环节
+            _set_summarize(text, ctx, "tool_loop", receipt)
             return (receipt.get("summary") or "已完成")[:600]
         if n_trace:
             _ev(project, session_id, task_id, "tool", "内派工具环",
@@ -1124,6 +1301,15 @@ def _run_default(session_id, project, episode, text, task_id, ctx, cfg):
         episode=episode, cwd=common.project_dir(project))
     verified = state.get("verified") or []
     rounds = int(state.get("rounds") or 0)
+    if adapter is not None:
+        # P7c：run_loop 外派（acp/cli）完成 → 统一总结环节（成功/失败均总结）
+        _set_summarize(text, ctx, mode, {
+            "status": "done" if verified else ("error" if rounds else "error"),
+            "summary": ("完成 %d 轮，%d 轮通过校验（loop %s）"
+                        % (rounds, len(verified), loop_id)),
+            "tool_trace": [], "changes": [], "rounds": rounds,
+            "error": None if verified else "未通过校验（loop %s）" % loop_id,
+        })
     if verified:
         _ev(project, session_id, task_id, "tool", tool_title,
             "success", "完成 %d 轮，%d 轮通过校验（loop %s）" % (rounds, len(verified), loop_id))
@@ -1525,7 +1711,8 @@ def _run_settings(session_id, project, episode, text, task_id, ctx, cfg):
     try:
         overrides = {"agent": patch}
         if common.LOCAL_OVERRIDES.exists():
-            old = json.loads(common.LOCAL_OVERRIDES.read_text(encoding="utf-8"))
+            # utf-8-sig：兼容 Windows 工具写入的 UTF-8 BOM（PowerShell Set-Content 等）
+            old = json.loads(common.LOCAL_OVERRIDES.read_text(encoding="utf-8-sig"))
             overrides = common._deep_merge(old or {}, overrides)
         common.LOCAL_OVERRIDES.write_text(
             json.dumps(overrides, ensure_ascii=False, indent=1), encoding="utf-8")

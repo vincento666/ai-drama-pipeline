@@ -154,6 +154,38 @@ class TestRoundAdapterReceipt(unittest.TestCase):
         rec = a.run_round("任务", timeout=5)
         self.assertEqual(rec["status"], "needs_info")
 
+    def test_run_round_auto_approves_permission(self):
+        frames = [
+            _update("tool_call", toolCallId="t1", title="Write",
+                    status="pending",
+                    content=[{"type": "content",
+                              "content": {"type": "text", "text": ""}}]),
+            {"jsonrpc": "2.0", "id": 0, "method": "session/request_permission",
+             "params": {"sessionId": "s1", "options": [
+                 {"optionId": "approve_once", "name": "Approve once",
+                  "kind": "allow_once"},
+                 {"optionId": "reject", "name": "Reject", "kind": "reject_once"}]}},
+            _update("tool_call_update", toolCallId="t1", status="completed",
+                    title="Write"),
+            _update("agent_message_chunk",
+                    content={"type": "text", "text": "已写入"}),
+            _resp(),
+        ]
+        a = _mk_round(frames)
+        rec = a.run_round("写文件", timeout=5)
+        self.assertEqual(rec["status"], "done")
+        self.assertEqual(rec["summary"], "已写入")
+        # 已自动批准：以同 id 的 JSON-RPC 响应回复 outcome=selected + allow 选项
+        sent = [json.loads(w) for w in a.proc.stdin.writes]
+        perm_resp = next((s for s in sent
+                          if s.get("id") == 0 and "outcome" in (s.get("result") or {})),
+                         None)
+        self.assertIsNotNone(perm_resp)
+        self.assertEqual(perm_resp["result"]["outcome"]["outcome"], "selected")
+        self.assertEqual(perm_resp["result"]["outcome"]["optionId"], "approve_once")
+        self.assertIn(("Write", "done"),
+                      [(t["name"], t["status"]) for t in rec["tool_trace"]])
+
     def test_continue_round_reuses_session(self):
         a = _mk_round([_update("agent_message_chunk",
                                content={"type": "text", "text": "ok"}),
@@ -497,5 +529,142 @@ class TestDelegateRoundEvents(unittest.TestCase):
         self.assertTrue(done)
 
 
+# ============ 7. 统一总结环节（_summarize_turn） ============
+
+class TestSummarizeParse(unittest.TestCase):
+    def test_parse_summary_json_full(self):
+        d = agent_manager._parse_summary_json(
+            '{"做了什么": "审查分镜", "产物/变更": "镜2灯光", '
+            '"问题/风险": "需重抽", "建议下一步": "重抽镜2"}')
+        self.assertEqual(d["做了什么"], "审查分镜")
+        self.assertEqual(d["建议下一步"], "重抽镜2")
+
+    def test_parse_summary_json_block(self):
+        d = agent_manager._parse_summary_json(
+            '好的。\n{"做了什么": "x", "问题/风险": "y"}\n完毕')
+        self.assertEqual(d["做了什么"], "x")
+
+    def test_parse_summary_json_unparseable(self):
+        self.assertIsNone(agent_manager._parse_summary_json("完全不是 JSON"))
+        self.assertIsNone(agent_manager._parse_summary_json(""))
+
+    def test_tool_trace_brief(self):
+        tr = [{"name": "Read", "status": "done"},
+              {"name": "Read", "status": "done"},
+              {"name": "Edit", "status": "done"}]
+        self.assertEqual(agent_manager._tool_trace_brief(tr), "Edit×1 · Read×2")
+        self.assertEqual(agent_manager._tool_trace_brief([]), "")
+
+
+class TestSummarizeTurn(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.stack = ExitStack()
+        self.stack.enter_context(mock.patch("common.OUTPUT",
+                                            Path(self.tmp.name) / "output"))
+        self.stack.enter_context(mock.patch("session_store.SESSIONS_ROOT",
+                                            Path(self.tmp.name) / "sessions"))
+        self.stack.enter_context(mock.patch("agent_manager.agent.resolve_provider",
+                                            return_value=FAKE_PROVIDER))
+        self.sid = session_store_create()
+
+    def tearDown(self):
+        self.stack.close()
+        self.tmp.cleanup()
+
+    def _req(self):
+        return {"mode": "acp", "goal": "帮我审查分镜改镜2灯光", "ctx": "上下文",
+                "receipt": {"status": "done",
+                            "summary": "已把镜2灯光改柔和",
+                            "tool_trace": [{"name": "Read", "status": "done"},
+                                           {"name": "Edit", "status": "done"}],
+                            "changes": [{"tool": "Edit"}],
+                            "rounds": 1, "session_id": "s1"}}
+
+    def test_summarize_llm_structured(self):
+        out = ('{"做了什么": "审查分镜并修改", "产物/变更": "E01/分镜.md 镜2 灯光", '
+               '"问题/风险": "镜2 已抽卡需重抽", "建议下一步": "重抽镜2 后再拼接"}')
+        with mock.patch("agent_manager.agent.chat", return_value=out):
+            text, meta = agent_manager._summarize_turn(
+                "t", self.sid, "task1", self._req(), common.Config({}))
+        self.assertIn("做了什么", text)
+        self.assertIn("审查分镜并修改", text)
+        self.assertIn("建议下一步", text)
+        self.assertEqual(meta["mode"], "acp")
+        self.assertEqual(meta["tool_trace_brief"], "Edit×1 · Read×1")
+        self.assertEqual(meta["rounds"], 1)
+        # trace 事件「回合完成 · 已总结」success
+        evs = agent_manager.session_store.list_events(
+            "t", self.sid).get("events") or []
+        done = [e for e in evs if "已总结" in e["title"]]
+        self.assertEqual(len(done), 1)
+        self.assertEqual(done[0]["status"], "success")
+        self.assertIn("1 轮 · 2 次工具调用", done[0]["summary"])
+
+    def test_summarize_llm_failure_falls_back_to_receipt(self):
+        with mock.patch("agent_manager.agent.chat",
+                        side_effect=Exception("down")):
+            text, meta = agent_manager._summarize_turn(
+                "t", self.sid, "task1", self._req(), common.Config({}))
+        self.assertIn("已把镜2灯光改柔和", text)   # 回执原文兜底
+        self.assertIn("回合总结", text)
+        self.assertEqual(meta["mode"], "acp")
+
+    def test_summarize_unparseable_falls_back(self):
+        with mock.patch("agent_manager.agent.chat", return_value="无法解析"):
+            text, meta = agent_manager._summarize_turn(
+                "t", self.sid, "task1", self._req(), common.Config({}))
+        self.assertIn("已把镜2灯光改柔和", text)
+
+    def test_summarize_needs_info_still_summarizes(self):
+        req = self._req()
+        req["receipt"] = {"status": "needs_info", "summary": "",
+                          "tool_trace": [], "changes": [], "rounds": 1,
+                          "error": "工具调用超过上限"}
+        with mock.patch("agent_manager.agent.chat",
+                        return_value='{"做了什么": "部分执行", "问题/风险": "超上限", '
+                                     '"建议下一步": "换个说法"}') as chat:
+            text, meta = agent_manager._summarize_turn(
+                "t", self.sid, "task1", req, common.Config({}))
+        self.assertIn("部分执行", text)
+        self.assertIn("超上限", text)
+        self.assertEqual(meta["mode"], "acp")
+        evs = agent_manager.session_store.list_events(
+            "t", self.sid).get("events") or []
+        self.assertTrue(any("已总结" in e["title"] for e in evs))
+
+    def test_run_turn_wires_summarize_into_assistant_message(self):
+        """_run_turn 收尾：handler 设置 _CUR.summarize → assistant 消息带总结 + meta。"""
+        out = ('{"做了什么": "工具环完成", "产物/变更": "config 更新", '
+               '"问题/风险": "无", "建议下一步": "继续"}')
+        stub_calls = {}
+
+        def stub_handler(sid, project, episode, text, tid, ctx, cfg):
+            agent_manager._set_summarize(
+                text, ctx, "tool_loop",
+                {"status": "done", "summary": "完成",
+                 "tool_trace": [{"name": "settings", "status": "done"}],
+                 "changes": [], "rounds": 1})
+            stub_calls["called"] = True
+            return "stub reply"
+
+        with mock.patch("agent_manager.agent.chat", return_value=out), \
+                mock.patch("agent_manager._build_handlers",
+                           return_value={"default": stub_handler}):
+            agent_manager._run_turn(self.sid, "t", "随便聊聊", 1, "task9")
+        msgs = agent_manager.session_store.list_messages("t", self.sid)
+        asst = [m for m in msgs if m.get("role") == "assistant"]
+        self.assertTrue(asst, "应有 assistant 消息")
+        last = asst[-1]
+        self.assertIn("工具环完成", last["text"])        # 总结文本
+        self.assertEqual(last["meta"].get("mode"), "tool_loop")
+        self.assertEqual(last["meta"].get("tool_trace_brief"), "settings×1")
+        self.assertTrue(last["meta"].get("summarized"))
+        self.assertTrue(stub_calls.get("called"))
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+
